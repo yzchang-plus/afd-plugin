@@ -206,6 +206,8 @@ class AFDNPUFFNWorker(NPUWorker):
             control_plane = self.model_runner.connector.control_plane
             assert control_plane is not None
             payload = control_plane.recv_dp_metadata_list()
+            if payload.stop:
+                return
             dp_metadata_list = payload.dp_metadata_list
             is_attn_graph_capturing = payload.is_graph_capturing
             is_warmup = payload.is_warmup

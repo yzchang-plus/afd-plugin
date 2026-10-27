@@ -4,11 +4,25 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import torch
 from vllm.config import VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.worker_base import CompilationTimes
 
+from afd_plugin.config import AFDConfig
+from afd_plugin.elastic.config import is_elastic_attention
+from afd_plugin.elastic.gpu import (
+    AFDElasticGPUExecutor,
+    connect,
+    finish_attention,
+    release_link,
+    send_stop,
+    update_topology,
+)
 from afd_plugin.model_executor.models.model_utils import get_afd_model_config
 from afd_plugin.v1.worker.attention_model_runner_v2 import (
     AFDAttentionModelRunnerV2,
@@ -39,6 +53,54 @@ class AFDAttentionWorker(Worker):
             distributed_init_method,
             is_driver_worker,
         )
+        self.afd_runtime_deferred = is_elastic_attention(vllm_config)
+        self.afd_kv_cache_config: KVCacheConfig | None = None
+        if self.afd_runtime_deferred:
+            self.elastic_ep_executor = AFDElasticGPUExecutor(self)
+
+    # Native explicit KV budgets still run profile. Delay that forward until F
+    # is receiving. Signature matches vLLM 0.26 Worker.determine_available_memory.
+    def determine_available_memory(self) -> int:
+        # ### PATCH START: defer AFD forward until cross-role rendezvous.
+        if self.afd_runtime_deferred:
+            budget = self.cache_config.kv_cache_memory_bytes
+            assert budget is not None and budget > 0
+            return budget
+        # ### PATCH END: defer AFD forward until cross-role rendezvous.
+        return super().determine_available_memory()
+
+    # Preserve the complete upstream allocator/KV-zero/input initialization.
+    # Signature matches vLLM 0.26 Worker.initialize_from_config.
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        # ### PATCH START: save config, never retain an old KV tensor allocation.
+        if is_elastic_attention(self.vllm_config):
+            self.afd_kv_cache_config = deepcopy(kv_cache_config)
+        # ### PATCH END: save config, never retain an old KV tensor allocation.
+        super().initialize_from_config(kv_cache_config)
+
+    # Return the native contract during deferred EEP initialization; real warmup
+    # follows after all target engines reach COMPLETE. Signature unchanged.
+    def compile_or_warm_up_model(self) -> CompilationTimes:
+        # ### PATCH START: EEP must not forward into stopped F workers.
+        if self.afd_runtime_deferred:
+            return CompilationTimes(language_model=0.0, encoder=0.0)
+        # ### PATCH END: EEP must not forward into stopped F workers.
+        return super().compile_or_warm_up_model()
+
+    def afd_send_stop(self) -> None:
+        send_stop(self)
+
+    def afd_release_link(self) -> None:
+        release_link(self)
+
+    def afd_update_topology(self, afd: AFDConfig) -> None:
+        update_topology(self, afd)
+
+    def afd_connect(self) -> None:
+        connect(self)
+
+    def afd_finish(self) -> None:
+        finish_attention(self)
 
     # Patch reason: vLLM 0.30.0 constructs its runner inside Worker.init_device
     # after an internal module import, with no injectable runner factory.

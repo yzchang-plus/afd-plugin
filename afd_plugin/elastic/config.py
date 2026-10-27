@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
+"""Configuration shared by the API process and role workers (CPU safe)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal
+
+from afd_plugin.config import AFDConfig, parse_afd_config, parse_optional_afd_config
+
+if TYPE_CHECKING:
+    from vllm.config import ParallelConfig, VllmConfig
+
+Role = Literal["attention", "ffn"]
+ATTENTION_WORKERS = (
+    "afd_plugin.v1.worker.AFDAttentionWorker",
+    "afd_plugin.v1.worker.npu.AFDNPUAttentionWorker",
+)
+
+
+def is_elastic_attention(config: VllmConfig) -> bool:
+    afd = parse_optional_afd_config(config)
+    return bool(
+        afd is not None
+        and afd.role == "attention"
+        and config.parallel_config.enable_elastic_ep
+    )
+
+
+def is_elastic_attention_worker(parallel: ParallelConfig) -> bool:
+    """Early ParallelConfig validation has worker_cls, but no additional_config."""
+    worker = parallel.worker_cls
+    return (
+        parallel.enable_elastic_ep
+        and isinstance(worker, str)
+        and worker.strip().replace(":", ".") in ATTENTION_WORKERS
+    )
+
+
+@dataclass(frozen=True)
+class ElasticTopology:
+    attention_dp: int
+    ffn_dp: int
+    attention_tp: int = 1
+    ffn_tp: int = 1
+
+    def validate(self) -> None:
+        if self.attention_dp < 2 or self.ffn_dp < 1:
+            raise ValueError("Elastic AFD requires A DP >= 2 and F DP >= 1")
+        # TP > 1 requires a separate static+EEP hardware qualification.
+        if self.attention_tp != 1 or self.ffn_tp != 1:
+            raise ValueError("This elastic AFD implementation currently requires TP=1")
+        if self.attention_dp * self.attention_tp < self.ffn_dp * self.ffn_tp:
+            raise ValueError("AFD requires attention ranks >= FFN ranks")
+
+    def resize(self, role: Role, size: int) -> ElasticTopology:
+        if role not in ("attention", "ffn"):
+            raise ValueError("role must be 'attention' or 'ffn'")
+        if type(size) is not int or size <= 0:
+            raise ValueError("new_data_parallel_size must be a positive integer")
+        target = replace(
+            self, **{"attention_dp" if role == "attention" else "ffn_dp": size}
+        )
+        target.validate()
+        return target
+
+    def afd_config(self, base: AFDConfig, *, port: int, role: Role) -> AFDConfig:
+        return replace(
+            base,
+            role=role,
+            port=port,
+            num_attention_ranks=self.attention_dp * self.attention_tp,
+            num_ffn_ranks=self.ffn_dp * self.ffn_tp,
+        )
+
+
+def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
+    afd = parse_afd_config(config, expected_role="attention")
+    parallel = config.parallel_config
+    raw = config.additional_config.get("afd_elastic", {})
+    if not isinstance(raw, dict) or set(raw) - {"ffn_tensor_parallel_size"}:
+        raise ValueError("afd_elastic accepts only ffn_tensor_parallel_size")
+    ffn_tp = raw.get("ffn_tensor_parallel_size", 1)
+    if type(ffn_tp) is not int or ffn_tp <= 0:
+        raise ValueError("ffn_tensor_parallel_size must be a positive integer")
+    if afd.num_ffn_ranks % ffn_tp:
+        raise ValueError("num_ffn_ranks must be divisible by FFN TP")
+    topology = ElasticTopology(
+        parallel.data_parallel_size,
+        afd.num_ffn_ranks // ffn_tp,
+        parallel.tensor_parallel_size,
+        ffn_tp,
+    )
+    topology.validate()
+    if config.use_v2_model_runner:
+        raise ValueError("Elastic AFD requires VLLM_USE_V2_MODEL_RUNNER=0")
+    if afd.num_attention_ranks != topology.attention_dp * topology.attention_tp:
+        raise ValueError("num_attention_ranks must equal A DP * A TP")
+    if not is_elastic_attention_worker(parallel):
+        raise ValueError("Elastic AFD requires an explicit AFD attention --worker-cls")
+    if parallel.enable_eplb or not parallel.enable_expert_parallel:
+        raise ValueError(
+            "Elastic AFD requires expert parallel enabled and EPLB disabled"
+        )
+    if (
+        parallel.data_parallel_backend != "ray"
+        or parallel.distributed_executor_backend != "uni"
+        or parallel.data_parallel_external_lb
+        or parallel.data_parallel_hybrid_lb
+        or parallel._api_process_count != 1
+    ):
+        raise ValueError(
+            "Elastic AFD requires Ray DP, uni executor, and one internal LB"
+        )
+    if (
+        parallel.pipeline_parallel_size != 1
+        or parallel.prefill_context_parallel_size != 1
+        or parallel.decode_context_parallel_size != 1
+        or parallel.use_ubatching
+        or afd.async_dp
+    ):
+        raise ValueError(
+            "Elastic AFD requires PP=PCP=DCP=1, synchronous DP, and no DBO"
+        )
+    if not config.cache_config.kv_cache_memory_bytes:
+        raise ValueError("Elastic AFD requires an explicit --kv-cache-memory-bytes")
+    if (
+        config.speculative_config is not None
+        or config.lora_config is not None
+        or config.kv_transfer_config is not None
+        or config.model_config.enable_sleep_mode
+    ):
+        raise ValueError(
+            "Elastic AFD does not support speculation, LoRA, KV transfer, sleep"
+        )
+    if afd.connector != "P2pNcclAFDConnector":
+        raise ValueError(
+            "Elastic AFD currently requires P2pNcclAFDConnector. Ascend needs the "
+            "stateless HCCL EEP group qualification before enabling elastic execution."
+        )
+    return topology
+
+
+def set_afd_config(config: VllmConfig, afd: AFDConfig) -> None:
+    # Preserve connector-specific configuration, which is not part of AFDConfig.
+    config.additional_config["afd"] = {
+        **config.additional_config["afd"],
+        "role": afd.role,
+        "host": afd.host,
+        "port": afd.port,
+        "num_attention_ranks": afd.num_attention_ranks,
+        "num_ffn_ranks": afd.num_ffn_ranks,
+    }

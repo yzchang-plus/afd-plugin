@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
-"""Actor factory seams, copied from vLLM 0.26 (ced6857afa0e), no new A manager."""
+"""Actor factory seams, copied from vLLM 0.30.0 (ced6857afa0e), no new A manager."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 # Patch reason: EEP's used-device local-rank arithmetic includes colocated F.
 # Change: choose the native-derived AFD actor only for elastic attention.
-# Signature: matches vLLM 0.26 CoreEngineActorManager.__init__.
+# Signature: matches vLLM 0.30.0 CoreEngineActorManager.__init__.
 # Upstream target/removal: an actor-class factory in the native manager.
 def __init__(
     self,
@@ -54,9 +54,9 @@ def __init__(
     self.local_engine_actors: list[ray.ActorHandle] = []
     self.remote_engine_actors: list[ray.ActorHandle] = []
 
-    env_vars_list = get_env_vars_to_copy(
+    env_vars_list = upstream.get_env_vars_to_copy(
         destination=actor_class.__name__,
-        exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+        exclude_vars=upstream.WORKER_SPECIFIC_ENV_VARS,
     )
     self.env_vars_dict = {
         name: os.environ[name] for name in env_vars_list if name in os.environ
@@ -117,7 +117,7 @@ def __init__(
     ):
         dp_vllm_config = copy.deepcopy(vllm_config)
         if dp_size > 1:
-            _apply_dp_identity_suffix(dp_vllm_config, index)
+            upstream._apply_dp_identity_suffix(dp_vllm_config, index)
         dp_vllm_config.parallel_config.placement_group = pg
         local_client = index < local_engine_count
 
@@ -127,7 +127,7 @@ def __init__(
         # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
         if current_platform.is_xpu():
             device_evar = current_platform.device_control_env_var
-            physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
+            physical_gpu_ids = upstream.get_physical_gpu_ids_for_local_dp_rank(
                 device_evar, local_index, world_size
             )
             actor_env_vars = self.env_vars_dict.copy()
@@ -220,7 +220,7 @@ def scale_up_elastic_ep(
         rank = cur_data_parallel_size + i
         dp_vllm_config = copy.deepcopy(cur_vllm_config)
         if new_data_parallel_size > 1:
-            _apply_dp_identity_suffix(dp_vllm_config, rank)
+            upstream._apply_dp_identity_suffix(dp_vllm_config, rank)
         dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         dp_vllm_config.parallel_config.eplb_config.num_redundant_experts = (
             num_redundant_experts

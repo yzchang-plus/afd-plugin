@@ -91,7 +91,20 @@ class FFNActorManager:
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
         from vllm.ray.ray_env import get_env_vars_to_copy
 
+        from vllm.platforms import current_platform
+
         # Existing roles have already been released collectively before removal.
+        # On Ascend, a reused FFN actor process cannot re-establish its HCCL
+        # communicators across a world-size change: the rootInfo rendezvous of
+        # a kept rank never meets the fresh rank's (hcclCommInitRootInfoConfig
+        # stalls until the 180 s timeout), so every NPU resize replaces the
+        # whole actor set with fresh processes (weight reload ~15 s per rank).
+        replace_all = (
+            current_platform.device_type == "npu" and len(self.actors) != size
+        )
+        while replace_all and len(self.actors) > 0:
+            ray.kill(self.actors.pop())
+            ray.util.remove_placement_group(self.placement_groups.pop())
         while len(self.actors) > size:
             ray.kill(self.actors.pop())
             ray.util.remove_placement_group(self.placement_groups.pop())

@@ -27,6 +27,7 @@ from afd_plugin.compat.npu import (
 from afd_plugin.config import AFD_ASYNC_CONNECTOR, parse_afd_config
 from afd_plugin.connectors import AFDConnectorFactory
 from afd_plugin.connectors.npu.async_cam import CAMAsyncAFDConnector
+from afd_plugin.elastic.npu import connect, release_link, update_topology
 from afd_plugin.model_executor.models.model_utils import get_afd_model_config
 from afd_plugin.v1.worker.npu.async_ffn_model_runner import AsyncNPUFFNModelRunner
 from afd_plugin.v1.worker.npu.ffn_model_runner import AFDNPUFFNModelRunner
@@ -105,6 +106,15 @@ class AFDNPUFFNWorker(NPUWorker):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return {}
+
+    def afd_release_link(self) -> None:
+        release_link(self)
+
+    def afd_update_topology(self, afd: dict[str, str | int | bool]) -> None:
+        update_topology(self, afd)
+
+    def afd_connect(self) -> None:
+        connect(self)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -235,6 +245,21 @@ class AFDNPUFFNWorker(NPUWorker):
             if not self._requires_async_drain():
                 self._ffn_loop_error = None
             raise RuntimeError("AFD NPU FFN worker loop failed") from error
+
+    def join_ffn_server_loop(self, timeout: float = 60.0) -> None:
+        """Join after A sent STOP; do not destroy a communicator under recv."""
+        thread = self._ffn_thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                raise TimeoutError(
+                    "AFD NPU FFN worker loop did not acknowledge STOP"
+                )
+        self.raise_ffn_loop_error_if_any()
+        self._ffn_thread = None
+        self._ffn_shutdown_event = None
+        # recv no longer blocks the device stream at this point.
+        torch.npu.synchronize(self.device)
 
     def stop_ffn_server_loop(self) -> None:
         event = self._ffn_shutdown_event

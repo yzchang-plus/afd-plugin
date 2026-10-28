@@ -15,7 +15,11 @@ from vllm.v1.executor import Executor
 def assigned_bundle_devices() -> list[str]:
     import ray
 
-    return ray.get_runtime_context().get_accelerator_ids()["GPU"]
+    from vllm.platforms import current_platform
+
+    return ray.get_runtime_context().get_accelerator_ids()[
+        current_platform.ray_device_key
+    ]
 
 
 class AFDEngineCoreActor(DPMoEEngineCoreActor):
@@ -50,25 +54,35 @@ class AFDEngineCoreActor(DPMoEEngineCoreActor):
         import ray
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        # EEP's CPU actor lives in bundle 1 (TP=1). Query reserved GPU bundle 0
-        # through a short zero-CPU task; Ray's assignment is stable within this
-        # one-GPU bundle. No extra GPU or placement group is allocated.
+        from vllm.platforms import current_platform
+
+        device_key = current_platform.ray_device_key
+        # EEP's CPU actor lives in bundle 1 (TP=1). Query reserved device bundle
+        # 0 through a short zero-CPU task; Ray's assignment is stable within
+        # this one-device bundle. No extra device or placement group is
+        # allocated. Ray maps num_gpus to the "GPU" resource only; non-CUDA
+        # accelerators (Ray detects Ascend NPUs as "NPU") go through resources.
+        device_options = (
+            {"num_gpus": 1}
+            if device_key == "GPU"
+            else {"num_gpus": 0, "resources": {device_key: 1}}
+        )
         ids = ray.get(
             ray.remote(assigned_bundle_devices)
             .options(
                 num_cpus=0,
-                num_gpus=1,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=vllm_config.parallel_config.placement_group,
                     placement_group_bundle_index=0,
                 ),
+                **device_options,
             )
             .remote()
         )
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(ids)
+        os.environ[current_platform.device_control_env_var] = ",".join(ids)
         parallel = vllm_config.parallel_config
         parallel.assigned_physical_gpu_ids = [int(device) for device in ids]
-        # The actor sees one GPU. The native used-GPU count can include F and
-        # exceed the global A rank, violating _init_data_parallel's local rank
-        # invariant. It is not a device index in this isolated process.
+        # The actor sees one device. The native used-device count can include
+        # F and exceed the global A rank, violating _init_data_parallel's local
+        # rank invariant. It is not a device index in this isolated process.
         parallel.data_parallel_rank_local = 0

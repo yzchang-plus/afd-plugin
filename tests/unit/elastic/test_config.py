@@ -108,10 +108,18 @@ def test_runtime_boundaries(config, field, value):
         validate_elastic_config(config)
 
 
-def test_npu_gate_is_explicit(config):
+def test_npu_connector_now_qualified(config):
+    # The stateless HCCL EEP group qualification landed in vllm-ascend
+    # (feat/eep-device-group); elastic execution is enabled for CAMP2P.
     config.additional_config["afd"]["connector"] = "CAMP2pAFDConnector"
     config.parallel_config.worker_cls = "afd_plugin.v1.worker.npu.AFDNPUAttentionWorker"
-    with pytest.raises(ValueError, match="stateless HCCL"):
+    assert validate_elastic_config(config) == ElasticTopology(2, 1)
+
+
+def test_unqualified_connector_is_explicit(config):
+    config.additional_config["afd"]["connector"] = "CAMAsyncAFDConnector"
+    config.parallel_config.worker_cls = "afd_plugin.v1.worker.npu.AFDNPUAttentionWorker"
+    with pytest.raises(ValueError, match="CAMP2pAFDConnector"):
         validate_elastic_config(config)
 
 

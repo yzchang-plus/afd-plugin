@@ -21,6 +21,10 @@ ATTENTION_WORKERS = (
 
 
 def is_elastic_attention(config: VllmConfig) -> bool:
+    # Duck-typed config doubles (unit tests) may omit additional_config; such
+    # a config is never elastic. parse_optional_afd_config stays strict.
+    if getattr(config, "additional_config", None) is None:
+        return False
     afd = parse_optional_afd_config(config)
     return bool(
         afd is not None
@@ -149,10 +153,11 @@ def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
         raise ValueError(
             "Elastic AFD does not support speculation, LoRA, KV transfer, sleep"
         )
-    if afd.connector != "P2pNcclAFDConnector":
+    if afd.connector not in ("P2pNcclAFDConnector", "CAMP2pAFDConnector"):
         raise ValueError(
-            "Elastic AFD currently requires P2pNcclAFDConnector. Ascend needs the "
-            "stateless HCCL EEP group qualification before enabling elastic execution."
+            "Elastic AFD currently requires P2pNcclAFDConnector (CUDA) or "
+            "CAMP2pAFDConnector (Ascend NPU; the stateless HCCL EEP group "
+            "qualification is provided by vllm-ascend feat/eep-device-group)."
         )
     return topology
 

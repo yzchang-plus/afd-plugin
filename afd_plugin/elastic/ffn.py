@@ -19,18 +19,33 @@ if TYPE_CHECKING:
     from vllm.v1.executor import Executor
 
 
+def _device_attribution() -> tuple[str, str]:
+    """(Ray resource key, device visibility env var) for this platform.
+
+    CUDA reports accelerators under the "GPU" resource; Ray 2.48 detects
+    Ascend NPUs natively as "NPU" with ASCEND_RT_VISIBLE_DEVICES. Both come
+    from the vLLM platform, which vllm-ascend already defines.
+    """
+    from vllm.platforms import current_platform
+
+    return current_platform.ray_device_key, current_platform.device_control_env_var
+
+
 class FFNActor:
     """Short control RPCs; model computation runs in the worker's existing thread.
 
     Runtime imports deliberately follow Ray device assignment in the actor,
-    so importing this module on the API process does not initialize CUDA.
+    so importing this module on the API process does not initialize the device.
     """
 
     def __init__(self) -> None:
         import ray
 
-        self.device_ids = ray.get_runtime_context().get_accelerator_ids()["GPU"]
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(self.device_ids)
+        device_key, env_var = _device_attribution()
+        self.device_ids = ray.get_runtime_context().get_accelerator_ids()[
+            device_key
+        ]
+        os.environ[env_var] = ",".join(self.device_ids)
         os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "0"
         self.executor: Executor | None = None
 
@@ -84,21 +99,30 @@ class FFNActorManager:
         env_names = get_env_vars_to_copy(destination="AFD FFNActor")
         env = {name: os.environ[name] for name in env_names if name in os.environ}
         env["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "0"
+        device_key, _ = _device_attribution()
+        # Ray maps num_gpus to the "GPU" resource only; non-CUDA accelerators
+        # (Ray detects Ascend NPUs as "NPU") are requested through resources.
+        # Same pattern as vllm.v1.executor.ray_executor.
+        device_options = (
+            {"num_gpus": 1}
+            if device_key == "GPU"
+            else {"num_gpus": 0, "resources": {device_key: 1}}
+        )
         while len(self.actors) < size:
             pg = ray.util.placement_group(
-                [{"GPU": 1, "CPU": 1}], strategy="STRICT_PACK"
+                [{device_key: 1, "CPU": 1}], strategy="STRICT_PACK"
             )
             self.placement_groups.append(pg)
             await pg.ready()
             actor = (
                 ray.remote(FFNActor)
                 .options(
-                    num_gpus=1,
                     num_cpus=1,
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg, placement_group_bundle_index=0
                     ),
                     runtime_env={"env_vars": env},
+                    **device_options,
                 )
                 .remote()
             )
@@ -110,6 +134,15 @@ class FFNActorManager:
     async def initialize_roles(
         self, topology: ElasticTopology, afd: AFDConfig, role_port: int
     ) -> None:
+        from vllm.platforms import current_platform
+
+        from afd_plugin.validation import NPU_FFN_WORKER_FQCN
+
+        worker_cls = (
+            NPU_FFN_WORKER_FQCN
+            if current_platform.device_type == "npu"
+            else "afd_plugin.v1.worker.AFDFFNWorker"
+        )
         configs = []
         for rank in range(topology.ffn_dp):
             config = copy.deepcopy(self.startup_config)
@@ -129,7 +162,7 @@ class FFNActorManager:
             parallel._coord_store_port = None
             parallel.placement_group = None
             parallel.assigned_physical_gpu_ids = None
-            parallel.worker_cls = "afd_plugin.v1.worker.AFDFFNWorker"
+            parallel.worker_cls = worker_cls
             parallel.distributed_executor_backend = "uni"
             configs.append(config)
         # Submit every rank before awaiting any collective initialization.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
+
 """Exercise the real wire schema without requiring a device PyTorch build."""
 
 import importlib.util

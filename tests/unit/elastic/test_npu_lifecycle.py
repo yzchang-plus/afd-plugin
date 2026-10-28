@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
+
 """Ascend device operations are doubles; worker lifecycle/order is production code.
 
 Mirrors test_gpu_lifecycle.py for the NPU action module: afd_plugin/elastic/npu.py

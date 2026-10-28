@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
+
 """Run the installed patch methods with small upstream doubles, without CUDA."""
 
 import asyncio

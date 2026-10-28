@@ -23,8 +23,7 @@ def gpu(monkeypatch):
     workspace = [False]
 
     def init_workspace(device, num_ubatches):
-        assert num_ubatches == 1
-        workspace[0] = True
+        workspace[0] = num_ubatches
         events.append("workspace_init")
 
     def unlock():
@@ -123,8 +122,13 @@ def test_topology_rpc_restores_config_after_msgpack(gpu, config, role):
     assert parse_afd_config(config) == target
 
 
-def test_reload_recreates_workspace_before_model_and_full_kv(gpu, monkeypatch, config):
+@pytest.mark.parametrize("enable_dbo", [False, True])
+def test_reload_recreates_workspace_before_model_and_full_kv(
+    gpu, monkeypatch, config, enable_dbo
+):
     events = gpu.events
+    config.parallel_config.enable_dbo = enable_dbo
+    config.parallel_config.use_ubatching = enable_dbo
 
     def old_shutdown():
         events.append("shutdown")
@@ -132,7 +136,7 @@ def test_reload_recreates_workspace_before_model_and_full_kv(gpu, monkeypatch, c
 
     class Runner:
         def __init__(self, cfg, device):
-            assert gpu.workspace[0]
+            assert gpu.workspace[0] == (2 if enable_dbo else 1)
             events.append("runner")
 
     module = types.ModuleType("afd_plugin.v1.worker.attention_model_runner")

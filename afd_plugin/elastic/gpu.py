@@ -191,7 +191,9 @@ class AFDElasticGPUExecutor(ElasticEPScalingExecutor):
         torch.cuda.empty_cache()
         # Runner.shutdown resets the process workspace. Worker.init_device is
         # deliberately not rerun while EEP switches the existing device groups.
-        init_workspace_manager(worker.device, num_ubatches=1)
+        init_workspace_manager(
+            worker.device, num_ubatches=2 if worker.parallel_config.enable_dbo else 1
+        )
         _replace_active_groups(**pop_standby_groups())
         parallel = worker.parallel_config
         parallel.data_parallel_size = request.new_data_parallel_size

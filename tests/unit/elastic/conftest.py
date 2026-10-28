@@ -29,6 +29,7 @@ def config():
             pipeline_parallel_size=1,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=1,
+            enable_dbo=False,
             use_ubatching=False,
             _api_process_count=1,
         ),

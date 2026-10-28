@@ -10,6 +10,7 @@ class FakeFFN:
     def __init__(self, config):
         self.events = []
         self.connect_barrier = None
+        self._prepared = None
 
     async def resize_actors(self, size):
         self.events.append(("f_actors", size))
@@ -47,6 +48,8 @@ class FakeClient:
         if method == "afd_update_topology":
             assert isinstance(args[0], dict)
             assert args[0]["role"] == "attention"
+        if method == "afd_update_topology":
+            self.vllm_config.additional_config["afd"] = dict(args[0])
         self.events.append(("a", method))
         if method == "afd_connect" and self.connect_barrier is not None:
             await self.connect_barrier()
@@ -67,14 +70,18 @@ class FakeClient:
         self.events.append(("eep_complete", engine, done))
         return done
 
-    async def _scale_up_elastic_ep(self, old, new):
-        assert self.vllm_config.additional_config["afd"]["num_attention_ranks"] == new
-        self.events.append(("native_eep_up", old, new))
-        self.core_engines = list(range(new))
-        self.vllm_config.parallel_config.data_parallel_size = new
+    async def prepare_elastic_ep(self, new_data_parallel_size):
+        assert (
+            self.vllm_config.additional_config["afd"]["num_attention_ranks"]
+            == new_data_parallel_size
+        )
+        self.events.append(("native_eep_prepare", new_data_parallel_size))
+        self._prepared = new_data_parallel_size
 
-    async def _scale_down_elastic_ep(self, old, new):
-        self.events.append(("native_eep_down", old, new))
+    async def commit_elastic_ep(self):
+        new = self._prepared
+        assert new is not None
+        self.events.append(("native_eep_commit", new))
         self.core_engines = list(range(new))
         self.vllm_config.parallel_config.data_parallel_size = new
 
@@ -123,7 +130,7 @@ def test_a_resize_reuses_native_eep_and_waits_every_target(runtime):
         ("a", "afd_release_link")
     )
     assert events.index(("a", "afd_release_link")) < events.index(
-        ("native_eep_up", 2, 4)
+        ("native_eep_prepare", 4)
     )
     for engine in range(4):
         assert events.index(("eep_complete", engine, True)) < events.index(
@@ -162,5 +169,7 @@ def test_complete_resize_chain(runtime):
         runtime.client.vllm_config
     )
     assert runtime.events.count(("resume",)) == 4
-    assert ("native_eep_up", 2, 4) in runtime.events
-    assert ("native_eep_down", 4, 2) in runtime.events
+    assert ("native_eep_prepare", 4) in runtime.events
+    assert ("native_eep_commit", 4) in runtime.events
+    assert ("native_eep_prepare", 2) in runtime.events
+    assert ("native_eep_commit", 2) in runtime.events

@@ -127,7 +127,7 @@ def npu(monkeypatch):
         "afd_plugin.v1.worker.npu.npu_ubatch_wrapper": {
             "AscendUBatchWrapper": AscendUBatchWrapper
         },
-        "afd_plugin.v1.worker.npu.attention_model_runner": {},
+        "afd_plugin.v1.worker.npu.attention_model_runner_v2": {},
         "afd_plugin.compat.npu": {
             "npu_afd_num_ubatches": lambda cfg: (
                 2 if cfg.parallel_config.use_ubatching else 1
@@ -167,8 +167,9 @@ def npu(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("enable_dbo", [False, True])
-def test_release_drops_acl_graphs_before_closing_connector(npu, config, enable_dbo):
+def test_release_drops_acl_graphs_before_closing_connector(npu, config):
+    # V2: DBO captures live in ACLGraphWrapper registry instances; there is
+    # no separate MRV1 ubatch-wrapper graph state to retire.
     events = npu.events
     retired_params = npu.acl_graph._graph_params
     retired_pool = npu.platform._global_graph_pool
@@ -185,9 +186,7 @@ def test_release_drops_acl_graphs_before_closing_connector(npu, config, enable_d
 
     wrapper = ACLGraphWrapperDouble()
     npu.wrappers.add(wrapper)
-    model = npu.ubatch_wrapper() if enable_dbo else SimpleNamespace()
-    if enable_dbo:
-        model.cudagraphs[8] = graph
+    model = SimpleNamespace()
     del graph
 
     def close():
@@ -216,9 +215,6 @@ def test_release_drops_acl_graphs_before_closing_connector(npu, config, enable_d
     assert npu.platform._global_graph_pool is not retired_pool
     assert wrapper.concrete_aclgraph_entries == {}
     assert wrapper.graph_pool is not retired_pool
-    if enable_dbo:
-        assert model.cudagraphs == {}
-        assert events.index("clear_dbo_graphs") < events.index("close_connector")
     assert events.index("close_connector") < events.index("empty_cache")
 
 
@@ -279,24 +275,19 @@ def test_finish_releases_old_kv_before_allocating_and_enables_real_warmup(npu):
         assert not worker.afd_runtime_deferred
         events.append("profile")
 
-    worker.model_runner = SimpleNamespace(
-        _cleanup_profiling_kv_cache=lambda: events.append("free_kv"),
-        input_batch=SimpleNamespace(
-            block_table=SimpleNamespace(clear=lambda: events.append("clear_blocks"))
-        ),
-        profile_run=profile,
-    )
+    # V2: no separate profiling-KV free / block_table clear steps;
+    # initialize_from_config reassigns KV buffers and block tables.
+    worker.model_runner = SimpleNamespace(profile_run=profile)
     worker.afd_kv_cache_config = {"blocks": 16}
     worker.initialize_from_config = lambda cfg: events.append("allocate_kv")
     worker.compile_or_warm_up_model = lambda: events.append("warmup")
     npu.module.finish_attention(worker)
     assert (
-        events.index("free_kv")
-        < events.index("allocate_kv")
+        events.index("allocate_kv")
         < events.index("profile")
         < events.index("warmup")
     )
-    assert events[-2:] == ["clear_blocks", "sync"]
+    assert events[-2:] == ["lock", "sync"]
 
 
 def test_reload_recreates_workspace_before_model_and_full_kv(npu, config):
@@ -313,8 +304,8 @@ def test_reload_recreates_workspace_before_model_and_full_kv(npu, config):
             assert npu.workspace[0] == 2, "DBO workspace width must be restored"
             events.append("runner")
 
-    runner_module = sys.modules["afd_plugin.v1.worker.npu.attention_model_runner"]
-    runner_module.AFDNPUAttentionModelRunner = Runner
+    runner_module = sys.modules["afd_plugin.v1.worker.npu.attention_model_runner_v2"]
+    runner_module.AFDNPUAttentionModelRunnerV2 = Runner
     saved_kv = {"groups": ["attention"], "blocks": 16}
 
     def initialize_kv(kv):

@@ -70,6 +70,6 @@ def test_only_new_local_actor_is_waited_and_started(monkeypatch, config):
         run_refs=[],
         actor_run_ref_dict={},
     )
-    namespace["scale_up_elastic_ep"](manager, config, 3)
+    namespace["scale_up_elastic_ep"](manager, config, 3, 0)
     assert events == [("new_local", "wait"), ("new_local", "run")]
     assert len(manager.actor_run_ref_dict) == 1

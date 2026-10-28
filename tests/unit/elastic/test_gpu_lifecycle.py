@@ -256,24 +256,19 @@ def test_finish_releases_old_kv_before_allocating_and_enables_real_warmup(gpu):
         assert not worker.afd_runtime_deferred
         events.append("profile")
 
-    worker.model_runner = SimpleNamespace(
-        _cleanup_profiling_kv_cache=lambda: events.append("free_kv"),
-        input_batch=SimpleNamespace(
-            block_table=SimpleNamespace(clear=lambda: events.append("clear_blocks"))
-        ),
-        profile_run=profile,
-    )
+    # V2: no separate profiling-KV free / block_table clear steps;
+    # initialize_from_config reassigns KV buffers and block tables.
+    worker.model_runner = SimpleNamespace(profile_run=profile)
     worker.afd_kv_cache_config = {"blocks": 16}
     worker.initialize_from_config = lambda cfg: events.append("allocate_kv")
     worker.compile_or_warm_up_model = lambda: events.append("warmup")
     gpu.module.finish_attention(worker)
     assert (
-        events.index("free_kv")
-        < events.index("allocate_kv")
+        events.index("allocate_kv")
         < events.index("profile")
         < events.index("warmup")
     )
-    assert events[-2:] == ["clear_blocks", "sync"]
+    assert events[-2:] == ["lock", "sync"]
 
 
 def _worker_methods(class_name, methods):

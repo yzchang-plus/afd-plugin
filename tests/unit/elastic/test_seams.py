@@ -59,6 +59,9 @@ def seams(monkeypatch, config):
         "vllm.v1.engine.core": {"DPEngineCoreProc": NativeCore},
         "vllm.v1.engine.core_client": {"DPLBAsyncMPClient": NativeClient},
         "vllm.v1.executor": {"Executor": type("Executor", (), {})},
+        "vllm.v1.metrics.loggers": {
+            "StatLoggerManager": type("StatLoggerManager", (), {})
+        },
     }
     for name, attrs in stubs.items():
         module = types.ModuleType(name)
@@ -79,6 +82,7 @@ def seams(monkeypatch, config):
     engine._afd_elastic = SimpleNamespace(topology=ElasticTopology(2, 1), resize=resize)
     llm = NativeAsyncLLM()
     llm.vllm_config = config
+    llm.log_stats = False
     llm.engine_core = engine
     llm.output_processor = SimpleNamespace(has_unfinished_requests=lambda: False)
     return SimpleNamespace(
@@ -91,9 +95,12 @@ def seams(monkeypatch, config):
     )
 
 
-def test_a_calls_original_eep_entry_but_f_does_not(seams):
+def test_a_and_f_resize_route_through_the_controller(seams):
+    # v0.30 re-anchor: A no longer re-enters the native client entry; the
+    # controller drives native prepare/commit internally (see test_client).
     asyncio.run(seams.llm.scale_elastic_ep(4))
-    assert seams.events == [("native_async", 4), ("attention", 4)]
+    assert seams.events == [("attention", 4)]
+    assert seams.llm.vllm_config.parallel_config.data_parallel_size == 4
     seams.events.clear()
     asyncio.run(seams.llm.scale_elastic_ep(2, role="ffn"))
     assert seams.events == [("ffn", 2)]

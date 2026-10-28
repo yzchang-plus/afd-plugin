@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
-"""ParallelConfig seam copied from vLLM 0.26.0, commit 568afb3a."""
+"""ParallelConfig seam copied from vLLM 0.30.0, commit ced6857afa0e."""
 
 from __future__ import annotations
 
@@ -52,7 +52,6 @@ def __post_init__(self) -> None:
             )
         # ### PATCH START: no async EPLB/NIXL dependency for AFD attention.
         if self.eplb_config.use_async and not is_elastic_attention_worker(self):
-            # ### PATCH END: no async EPLB/NIXL dependency for AFD attention.
             from vllm.distributed.nixl_utils import is_nixl_available
 
             if not is_nixl_available():
@@ -61,6 +60,7 @@ def __post_init__(self) -> None:
                     "package. Either install NIXL or set "
                     "--eplb-config.use_async=false."
                 )
+            # ### PATCH END: no async EPLB/NIXL dependency for AFD attention.
 
     if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
         # Data parallel was specified in the engine args.
@@ -77,7 +77,9 @@ def __post_init__(self) -> None:
         if not self.enable_elastic_ep:
             if not self._data_parallel_master_port_list:
                 self._data_parallel_master_port_list = get_open_ports_list(5)
-            self.data_parallel_master_port = self._data_parallel_master_port_list.pop()
+            self.data_parallel_master_port = (
+                self._data_parallel_master_port_list.pop()
+            )
 
         if not (0 <= self.data_parallel_rank < self.data_parallel_size):
             raise ValueError(
@@ -94,8 +96,21 @@ def __post_init__(self) -> None:
 
         if self.data_parallel_size > 1 and self.is_moe_model is False:
             raise ValueError(
-                "Offline data parallel mode is not supported/useful for dense models."
+                "Offline data parallel mode is not supported/useful"
+                " for dense models."
             )
+
+    max_dp_size = self.elastic_ep_max_dp_size
+    self.elastic_ep_max_dp_size = (
+        max_dp_size
+        if self.enable_elastic_ep and max_dp_size is not None
+        else self.data_parallel_size
+    )
+    if self.elastic_ep_max_dp_size < self.data_parallel_size:
+        raise ValueError(
+            "--elastic-ep-max-dp-size must be greater than or equal to "
+            f"the initial data_parallel_size ({self.data_parallel_size})."
+        )
 
     self.data_parallel_index = self.data_parallel_rank
 
@@ -129,7 +144,8 @@ def __post_init__(self) -> None:
             )
         elif self.data_parallel_backend == "ray":
             logger.info(
-                "Using ray distributed inference because data_parallel_backend is ray"
+                "Using ray distributed inference because "
+                "data_parallel_backend is ray"
             )
             backend = "ray"
         elif ray_found:
@@ -155,7 +171,10 @@ def __post_init__(self) -> None:
             "not supported and will be ignored."
         )
     allowed_backends = ("mp", "uni", "external_launcher")
-    if self.distributed_executor_backend not in allowed_backends and self.nnodes > 1:
+    if (
+        self.distributed_executor_backend not in allowed_backends
+        and self.nnodes > 1
+    ):
         raise ValueError(
             "nnodes > 1 can only be set when distributed executor "
             "backend is mp, uni or external_launcher."
@@ -163,7 +182,7 @@ def __post_init__(self) -> None:
 
     if self.enable_eplb and self.eplb_config.communicator is None:
         # Prefer NIXL when available: zero-copy RDMA reads, compatible
-        # with both async EPLB and elastic EP (deferred remote setup).
+        # with both async EPLB and elastic EP.
         # Fallbacks: pynccl for elastic EP (stateless groups need it),
         # torch_gloo for static EP.  torch_nccl is avoided because NCCL
         # is incompatible with async EPLB (multi-stream conflicts) and

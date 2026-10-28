@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
-"""Narrow EEP integration seams, pinned to vLLM 0.26.0 (568afb3a).
+"""Narrow EEP integration seams, pinned to vLLM 0.30.0 (ced6857afa0e).
 
 No ElasticEPScalingState code is patched. Worker role actions are implemented
-by AFDElasticGPUExecutor. Upstream targets: an optional EEP worker factory,
-post-READY initialization and an explicit EEP-complete utility.
+by AFDElasticGPUExecutor; role-aware orchestration drives the native
+prepare_elastic_ep/commit_elastic_ep client RPCs through ElasticAFDClient.
+Upstream targets: an optional EEP worker factory, post-READY initialization
+and an explicit EEP-complete utility.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.executor import Executor
+from vllm.v1.metrics.loggers import StatLoggerManager
 
 from afd_plugin.elastic.client import ElasticAFDClient
 from afd_plugin.elastic.config import Role, is_elastic_attention
@@ -55,13 +58,12 @@ async def initialize_afd(self) -> bool:
 
 def install() -> None:
     original_init = DPEngineCoreProc.__init__
-    original_client_scale = DPLBAsyncMPClient.scale_elastic_ep
     original_scale = AsyncLLM.scale_elastic_ep
     original_shutdown = DPLBAsyncMPClient.shutdown
 
     # Patch reason: native READY precedes the AFD cross-role rendezvous.
     # Change: keep new/initial A paused after normal engine construction.
-    # Signature: exact v0.26 DPEngineCoreProc.__init__.
+    # Signature: exact v0.30 DPEngineCoreProc.__init__.
     # Delegation exception: preserve constructor super() and handshake ordering;
     # only the post-construction pause is AFD-owned.
     def init(
@@ -91,23 +93,13 @@ def install() -> None:
             self.ignore_start_dp_wave = True
         # ### PATCH END: pause before the engine enters its busy loop.
 
-    # Patch reason: AFD needs pause/link teardown and restoration around EEP.
-    # Change: AFD controller invokes the original _scale_up/_scale_down methods.
-    # Signature: exact v0.26 DPLBAsyncMPClient.scale_elastic_ep.
-    async def client_scale(self, new_data_parallel_size: int) -> None:
-        # ### PATCH START: preserve the outer AsyncLLM scaling lifetime.
-        if is_elastic_attention(self.vllm_config):
-            await self._afd_elastic.resize(new_data_parallel_size, "attention")
-            return
-        # ### PATCH END: preserve the outer AsyncLLM scaling lifetime.
-        # Delegation keeps the native non-AFD assertion and dispatch unchanged.
-        await original_client_scale(self, new_data_parallel_size)
-
-    # Patch reason: native scale compares only with A size and optionally drains.
-    # Change: always drain AFD; F dispatch precedes A size/stat-logger updates.
-    # Signature: adds role="attention" to v0.26 AsyncLLM.scale_elastic_ep.
-    # Delegation exception: native A stat logger/config updates stay upstream;
-    # its finally runs only after the patched client finishes AFD restoration.
+    # Patch reason: native scale compares only with A size, drains optionally
+    # and owns no second role.
+    # Change: AFD owns role dispatch; the attention path runs the controller
+    # (pause/link teardown -> native prepare_elastic_ep/commit_elastic_ep ->
+    # cross-role reconnect) then mirrors upstream's stat-logger and config
+    # bookkeeping. Non-AFD deployments keep delegating to the native method.
+    # Signature: adds role="attention" to v0.30 AsyncLLM.scale_elastic_ep.
     async def scale(
         self,
         new_data_parallel_size: int,
@@ -138,17 +130,29 @@ def install() -> None:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Timed out draining elastic AFD requests")
                 await asyncio.sleep(0.1)
-            if role == "ffn":
-                await controller.resize(new_data_parallel_size, role)
-            else:
-                await original_scale(self, new_data_parallel_size, drain_timeout)
+            old_attention_dp = controller.topology.attention_dp
+            await controller.resize(new_data_parallel_size, role)
+            if role == "attention":
+                # Mirror v0.30 _scale_elastic_ep bookkeeping for the A path.
+                if new_data_parallel_size > old_attention_dp and self.log_stats:
+                    self.logger_manager = StatLoggerManager(
+                        vllm_config=self.vllm_config,
+                        engine_idxs=list(range(new_data_parallel_size)),
+                        custom_stat_loggers=None,
+                    )
+                    if hasattr(self, "_logger_ref"):
+                        self._logger_ref[0] = self.logger_manager
+                    self.logger_manager.log_engine_initialized()
+                self.vllm_config.parallel_config.data_parallel_size = (
+                    new_data_parallel_size
+                )
         finally:
             set_scaling_elastic_ep(False)
         # ### PATCH END: AFD role-aware drain and scale gate.
 
     # Patch reason: native client teardown owns only A actors.
     # Change: release this client's F actor pool, also on initialization failure.
-    # Signature: exact v0.26 MPClient.shutdown; inherited by DPLBAsyncMPClient.
+    # Signature: exact v0.30 MPClient.shutdown; inherited by DPLBAsyncMPClient.
     # Delegation exception: native process/thread/socket cleanup stays upstream.
     def shutdown(self, timeout: float | None = None) -> None:
         # ### PATCH START: close the optional per-client F sidecar.
@@ -161,7 +165,6 @@ def install() -> None:
     DPEngineCoreProc.__init__ = init
     DPEngineCoreProc.afd_eep_complete = afd_eep_complete
     DPEngineCoreProc.afd_reset_after_warmup = afd_reset_after_warmup
-    DPLBAsyncMPClient.scale_elastic_ep = client_scale
     DPLBAsyncMPClient.shutdown = shutdown
     AsyncLLM.scale_elastic_ep = scale
     AsyncLLM.initialize_afd = initialize_afd

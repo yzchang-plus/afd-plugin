@@ -68,11 +68,10 @@ class ElasticAFDClient:
         )
         if role == "attention":
             await self.ffn.collective_rpc("afd_update_topology", args=(asdict(ffn),))
-            old_size = self.topology.attention_dp
-            if size > old_size:
-                await self.client._scale_up_elastic_ep(old_size, size)
-            else:
-                await self.client._scale_down_elastic_ep(old_size, size)
+            # Native v0.30 two-phase RPC; prepare computes redundancy bounds
+            # and routes up/down internally, commit performs the switch.
+            await self.client.prepare_elastic_ep(size)
+            await self.client.commit_elastic_ep()
             # RECONFIGURE_FINISHED precedes COMPLETE. Query EngineCore itself,
             # yielding so its busy loop can continue state.progress().
             while not all(

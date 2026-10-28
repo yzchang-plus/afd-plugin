@@ -87,6 +87,11 @@ def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
         raise ValueError("ffn_tensor_parallel_size must be a positive integer")
     if afd.num_ffn_ranks % ffn_tp:
         raise ValueError("num_ffn_ranks must be divisible by FFN TP")
+    if parallel.elastic_ep_max_dp_size is None:
+        raise ValueError(
+            "Elastic AFD requires --elastic-ep-max-dp-size (native two-phase "
+            "scaling uses it as the A DP bound, e.g. 2x the initial size)."
+        )
     topology = ElasticTopology(
         parallel.data_parallel_size,
         afd.num_ffn_ranks // ffn_tp,

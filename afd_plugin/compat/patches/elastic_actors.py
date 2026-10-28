@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
-"""Actor factory seams, copied from vLLM 0.26 (568afb3a), no new A manager."""
+"""Actor factory seams, copied from vLLM 0.26 (ced6857afa0e), no new A manager."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def __init__(
     addresses: EngineZmqAddresses,
     executor_class: type[Executor],
     log_stats: bool,
-    placement_groups: list[PlacementGroup] | None = None,
+    placement_groups: list["PlacementGroup"] | None = None,
     local_dp_ranks: list[int] | None = None,
 ):
     import copy
@@ -35,6 +35,7 @@ def __init__(
     import ray
     from ray.runtime_env import RuntimeEnv
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
     from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
 
     dp_size = vllm_config.parallel_config.data_parallel_size
@@ -53,14 +54,12 @@ def __init__(
     self.local_engine_actors: list[ray.ActorHandle] = []
     self.remote_engine_actors: list[ray.ActorHandle] = []
 
-    env_vars_list = upstream.get_env_vars_to_copy(
+    env_vars_list = get_env_vars_to_copy(
         destination=actor_class.__name__,
-        exclude_vars=upstream.WORKER_SPECIFIC_ENV_VARS,
+        exclude_vars=WORKER_SPECIFIC_ENV_VARS,
     )
     self.env_vars_dict = {
-        name: upstream.os.environ[name]
-        for name in env_vars_list
-        if name in upstream.os.environ
+        name: os.environ[name] for name in env_vars_list if name in os.environ
     }
     runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
 
@@ -69,11 +68,11 @@ def __init__(
     self.log_stats = log_stats
     local_engine_count = vllm_config.parallel_config.data_parallel_size_local
     world_size = vllm_config.parallel_config.world_size
-    self.manager_stopped = upstream.threading.Event()
+    self.manager_stopped = threading.Event()
     self.failed_proc_name: str | None = None
 
     if ray.is_initialized():
-        upstream.logger.info("Ray is already initialized. Skipping Ray initialization.")
+        logger.info("Ray is already initialized. Skipping Ray initialization.")
     else:
         ray.init()
 
@@ -99,7 +98,7 @@ def __init__(
         assert len(placement_groups) == len(local_dp_ranks), (
             "placement_groups and local_dp_ranks must have the same length"
         )
-        upstream.logger.info("Using provided placement groups")
+        logger.info("Using provided placement groups")
         # TODO(rui): validate passed-in placement groups
         self.created_placement_groups = []
     else:
@@ -113,10 +112,12 @@ def __init__(
 
     self.placement_group_is_local = []
     refs = []
-    for index, local_index, pg in zip(range(dp_size), local_dp_ranks, placement_groups):  # noqa: B905
+    for index, local_index, pg in zip(
+        range(dp_size), local_dp_ranks, placement_groups
+    ):
         dp_vllm_config = copy.deepcopy(vllm_config)
         if dp_size > 1:
-            upstream._apply_dp_identity_suffix(dp_vllm_config, index)
+            _apply_dp_identity_suffix(dp_vllm_config, index)
         dp_vllm_config.parallel_config.placement_group = pg
         local_client = index < local_engine_count
 
@@ -124,9 +125,9 @@ def __init__(
         # setting device env vars in Ray actor's initialization method
         # will not affect device selection. See:
         # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
-        if upstream.current_platform.is_xpu():
-            device_evar = upstream.current_platform.device_control_env_var
-            physical_gpu_ids = upstream.get_physical_gpu_ids_for_local_dp_rank(
+        if current_platform.is_xpu():
+            device_evar = current_platform.device_control_env_var
+            physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
                 device_evar, local_index, world_size
             )
             actor_env_vars = self.env_vars_dict.copy()
@@ -168,22 +169,24 @@ def __init__(
         self.actor_run_ref_dict[actor] = ref
 
 
-# Patch reason: EEP's used-device local-rank arithmetic includes colocated F.
-# Change: choose the native-derived AFD actor only for elastic attention.
-# Signature: matches vLLM 0.26 CoreEngineActorManager.scale_up_elastic_ep.
-# Upstream target/removal: an actor-class factory in the native manager.
 def scale_up_elastic_ep(
-    self, cur_vllm_config: VllmConfig, new_data_parallel_size: int
+    self,
+    cur_vllm_config: VllmConfig,
+    new_data_parallel_size: int,
+    num_redundant_experts: int,
 ) -> None:
     import copy
 
     import ray
     from ray.runtime_env import RuntimeEnv
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
     from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
 
     actor_class = (
-        DPMoEEngineCoreActor if cur_vllm_config.model_config.is_moe else EngineCoreActor
+        DPMoEEngineCoreActor
+        if cur_vllm_config.model_config.is_moe
+        else EngineCoreActor
     )
     # ### PATCH START: AFD actor uses its actual Ray GPU bundle assignment.
     if is_elastic_attention(cur_vllm_config):
@@ -213,12 +216,15 @@ def scale_up_elastic_ep(
     runtime_env = RuntimeEnv(
         env_vars=self.env_vars_dict | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"}
     )
-    for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):  # noqa: B905
+    for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
         rank = cur_data_parallel_size + i
         dp_vllm_config = copy.deepcopy(cur_vllm_config)
         if new_data_parallel_size > 1:
-            upstream._apply_dp_identity_suffix(dp_vllm_config, rank)
+            _apply_dp_identity_suffix(dp_vllm_config, rank)
         dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        dp_vllm_config.parallel_config.eplb_config.num_redundant_experts = (
+            num_redundant_experts
+        )
         dp_vllm_config.parallel_config.placement_group = pg
 
         # Check if this placement group is on the head node
@@ -272,17 +278,10 @@ def scale_up_elastic_ep(
     )
     ray.get([actor.wait_for_init.remote() for actor in actors])
     # ### PATCH END: zero remote additions must not select old running actors.
-
     for actor in actors:
         ref = actor.run.remote()
         self.run_refs.append(ref)
         self.actor_run_ref_dict[actor] = ref
-
-    cur_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-    # Update old_vllm_config with new data_parallel_size_local if any new
-    # local engines were added
-    if new_local_engines > 0:
-        cur_vllm_config.parallel_config.data_parallel_size_local += new_local_engines
 
 
 CoreEngineActorManager.__init__ = __init__

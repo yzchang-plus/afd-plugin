@@ -6,10 +6,13 @@ import importlib.util
 import sys
 import types
 from contextlib import nullcontext
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from afd_plugin.config import parse_afd_config
 
 ROOT = Path(__file__).parents[3]
 
@@ -87,6 +90,37 @@ def gpu(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return SimpleNamespace(module=module, events=events, workspace=workspace)
+
+
+@pytest.mark.parametrize("role", ["attention", "ffn"])
+def test_topology_rpc_restores_config_after_msgpack(gpu, config, role):
+    msgspec = pytest.importorskip("msgspec")
+    previous = parse_afd_config(config)
+    target = replace(
+        previous,
+        role=role,
+        host="10.0.0.2",
+        port=30000,
+        num_attention_ranks=4,
+        num_ffn_ranks=2,
+    )
+    # EngineCore collective_rpc has an untyped nested args tuple. Msgspec
+    # decodes dataclasses/maps there as dicts, without restoring worker types.
+    (decoded,) = msgspec.msgpack.decode(msgspec.msgpack.encode((asdict(target),)))
+    wrapper = SimpleNamespace(afd_config=previous)
+    runner = SimpleNamespace(
+        afd_config=previous,
+        get_model=lambda: SimpleNamespace(modules=lambda: [wrapper]),
+    )
+    worker = SimpleNamespace(
+        vllm_config=config,
+        model_runner=runner,
+        afd_expected_role=role,
+    )
+    gpu.module.update_topology(worker, decoded)
+    assert runner.afd_config == target
+    assert wrapper.afd_config == target
+    assert parse_afd_config(config) == target
 
 
 def test_reload_recreates_workspace_before_model_and_full_kv(gpu, monkeypatch, config):

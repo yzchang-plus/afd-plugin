@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.worker_base import CompilationTimes
 
-from afd_plugin.config import AFDConfig
 from afd_plugin.elastic.config import is_elastic_attention
 from afd_plugin.elastic.gpu import (
     AFDElasticGPUExecutor,
@@ -93,7 +92,7 @@ class AFDAttentionWorker(Worker):
     def afd_release_link(self) -> None:
         release_link(self)
 
-    def afd_update_topology(self, afd: AFDConfig) -> None:
+    def afd_update_topology(self, afd: dict[str, str | int | bool]) -> None:
         update_topology(self, afd)
 
     def afd_connect(self) -> None:

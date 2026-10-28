@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import weakref
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from afd_plugin.config import parse_afd_config
@@ -34,7 +34,9 @@ class ElasticAFDClient:
         ffn = replace(attention, role="ffn")
         set_afd_config(self.client.vllm_config, attention)
         await asyncio.gather(
-            self.client.collective_rpc_async("afd_update_topology", args=(attention,)),
+            self.client.collective_rpc_async(
+                "afd_update_topology", args=(asdict(attention),)
+            ),
             self.ffn.initialize_roles(self.topology, ffn, role_port),
         )
         await self.finish()
@@ -61,9 +63,11 @@ class ElasticAFDClient:
         ffn = replace(attention, role="ffn")
         # The API config is the source copied by the *native* A ActorManager.
         set_afd_config(self.client.vllm_config, attention)
-        await self.client.collective_rpc_async("afd_update_topology", args=(attention,))
+        await self.client.collective_rpc_async(
+            "afd_update_topology", args=(asdict(attention),)
+        )
         if role == "attention":
-            await self.ffn.collective_rpc("afd_update_topology", args=(ffn,))
+            await self.ffn.collective_rpc("afd_update_topology", args=(asdict(ffn),))
             old_size = self.topology.attention_dp
             if size > old_size:
                 await self.client._scale_up_elastic_ep(old_size, size)

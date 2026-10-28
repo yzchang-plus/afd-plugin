@@ -21,6 +21,9 @@ class FakeFFN:
         self.events.append(("f_init", topology.ffn_dp, afd.role, port))
 
     async def collective_rpc(self, method, args=()):
+        if method == "afd_update_topology":
+            assert isinstance(args[0], dict)
+            assert args[0]["role"] == "ffn"
         self.events.append(("f", method))
         if method == "afd_connect" and self.connect_barrier is not None:
             await self.connect_barrier()
@@ -41,6 +44,9 @@ class FakeClient:
         self.connect_barrier = None
 
     async def collective_rpc_async(self, method, args=()):
+        if method == "afd_update_topology":
+            assert isinstance(args[0], dict)
+            assert args[0]["role"] == "attention"
         self.events.append(("a", method))
         if method == "afd_connect" and self.connect_barrier is not None:
             await self.connect_barrier()

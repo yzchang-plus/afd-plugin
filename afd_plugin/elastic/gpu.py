@@ -26,7 +26,7 @@ from vllm.v1.worker.workspace import (
     unlock_workspace,
 )
 
-from afd_plugin.config import AFDConfig, parse_afd_config
+from afd_plugin.config import afd_config_from_mapping, parse_afd_config
 from afd_plugin.connectors import AFDConnectorFactory, AFDControlPayload
 from afd_plugin.elastic.config import set_afd_config
 
@@ -66,7 +66,12 @@ def release_link(worker: AFDAttentionWorker | AFDFFNWorker) -> None:
     torch.cuda.empty_cache()
 
 
-def update_topology(worker: AFDAttentionWorker | AFDFFNWorker, afd: AFDConfig) -> None:
+def update_topology(
+    worker: AFDAttentionWorker | AFDFFNWorker, raw: dict[str, str | int | bool]
+) -> None:
+    # EngineCore's nested collective_rpc args are untyped after MessagePack
+    # decoding. Use the same explicit mapping contract for A and direct-Ray F.
+    afd = afd_config_from_mapping(raw, expected_role=worker.afd_expected_role)
     set_afd_config(worker.vllm_config, afd)
     worker.model_runner.afd_config = afd
     # Model wrappers only retain role/model settings today, but do not leave

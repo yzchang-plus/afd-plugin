@@ -1,9 +1,14 @@
 # Elastic AFD on Ascend NPU — recipe and validation record
 
-Status: validated on a single-machine 16× Ascend 910 cluster with
-DeepSeek-V2-Lite (W8A8), vLLM v0.26.0 (unmodified) + vllm-ascend
-`feat/eep-device-group` + afd-plugin `feat/elastic-afd-eep-npu`
-(GPU reference: `feat/elastic-afd-eep`).
+Status: the resize ladder below was validated on a single-machine 16x
+Ascend 910 cluster with DeepSeek-V2-Lite (W8A8) on the vLLM v0.26 /
+MRV1 stack (40 soak cycles, 160 resizes, no leaks; four rungs under
+8-way concurrent load with drain/503 semantics). The elastic code was
+since ported to this repository's current target (vLLM v0.30.0,
+ModelRunnerV2, building on the elastic-EP platform groundwork
+submitted to vllm-ascend): CPU unit suites pass, while a hardware
+revalidation on the 0.30 stack is pending. Evidence below predates the port unless
+marked otherwise.
 
 This document covers the NPU-specific behavior of the AFD elastic resize
 (`/scale_elastic_ep`). The orchestration flow, API semantics, and drain
@@ -17,7 +22,7 @@ boundary are shared with the GPU build and are documented in
 ray start --head ...  # ASCEND_RT_VISIBLE_DEVICES pins the visible chips
 
 # 2. Attention-role API server (example: 2A2F eager)
-vllm serve /new_data/weight/DSV2LiteWeight \
+vllm serve /path/to/DeepSeek-V2-Lite-W8A8 \
   --worker-cls afd_plugin.v1.worker.npu.AFDNPUAttentionWorker \
   --enable-expert-parallel --enable-elastic-ep \
   --data-parallel-backend ray --distributed-executor-backend uni \

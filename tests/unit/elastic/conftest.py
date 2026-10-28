@@ -33,7 +33,7 @@ def config():
             _api_process_count=1,
         ),
         cache_config=SimpleNamespace(kv_cache_memory_bytes=1048576),
-        model_config=SimpleNamespace(enable_sleep_mode=False),
+        model_config=SimpleNamespace(enable_sleep_mode=False, enforce_eager=True),
         use_v2_model_runner=False,
         speculative_config=None,
         lora_config=None,

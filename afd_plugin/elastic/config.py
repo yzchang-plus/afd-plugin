@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from afd_plugin.config import AFDConfig, parse_afd_config, parse_optional_afd_config
+from afd_plugin.v1.worker.cuda_graph import validate_cuda_graph_mode
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, VllmConfig
@@ -95,6 +96,16 @@ def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
     topology.validate()
     if config.use_v2_model_runner:
         raise ValueError("Elastic AFD requires VLLM_USE_V2_MODEL_RUNNER=0")
+    if not config.model_config.enforce_eager:
+        validate_cuda_graph_mode(config, role="attention")
+        # vLLM 0.26 GPUModelRunner.load_model returns before installing its
+        # CUDAGraphWrapper in STOCK_TORCH_COMPILE mode. F must not capture
+        # communication while A executes an unwrapped forward.
+        if config.compilation_config.mode.name == "STOCK_TORCH_COMPILE":
+            raise ValueError(
+                "Elastic AFD CUDA graphs do not support STOCK_TORCH_COMPILE; "
+                "use compilation mode NONE (0) or VLLM_COMPILE (3)"
+            )
     if afd.num_attention_ranks != topology.attention_dp * topology.attention_tp:
         raise ValueError("num_attention_ranks must equal A DP * A TP")
     if not is_elastic_attention_worker(parallel):

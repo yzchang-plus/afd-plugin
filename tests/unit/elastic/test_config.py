@@ -1,4 +1,5 @@
 import copy
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,36 @@ def test_default_and_independent_role_sizes(config):
     assert topology.resize("ffn", 2) == ElasticTopology(2, 2)
     # GPU's existing non-divisible topology is retained.
     assert ElasticTopology(3, 1).resize("ffn", 2) == ElasticTopology(3, 2)
+
+
+@pytest.mark.parametrize("mode", ["NONE", "VLLM_COMPILE"])
+def test_full_decode_graph_config(config, mode):
+    config.model_config.enforce_eager = False
+    config.compilation_config = SimpleNamespace(
+        mode=SimpleNamespace(name=mode),
+        cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
+    )
+    assert validate_elastic_config(config) == ElasticTopology(2, 1)
+
+
+def test_stock_compile_graph_rejected_before_role_initialization(config):
+    config.model_config.enforce_eager = False
+    config.compilation_config = SimpleNamespace(
+        mode=SimpleNamespace(name="STOCK_TORCH_COMPILE"),
+        cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
+    )
+    with pytest.raises(ValueError, match="STOCK_TORCH_COMPILE"):
+        validate_elastic_config(config)
+
+
+def test_unsupported_graph_mode_rejected_before_role_initialization(config):
+    config.model_config.enforce_eager = False
+    config.compilation_config = SimpleNamespace(
+        mode=SimpleNamespace(name="VLLM_COMPILE"),
+        cudagraph_mode=SimpleNamespace(name="FULL_AND_PIECEWISE"),
+    )
+    with pytest.raises(RuntimeError, match="FULL_DECODE_ONLY"):
+        validate_elastic_config(config)
 
 
 @pytest.mark.parametrize("size", [0, -1, True, 1.5, "2"])

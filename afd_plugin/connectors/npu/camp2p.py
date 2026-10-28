@@ -413,6 +413,15 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         _register_camp2p_custom_ops()
 
         num_ubatches = max(1, self.vllm_config.parallel_config.num_ubatches)
+        # The a2e/e2a custom ops resolve their HCCL communicator from the
+        # process-group *name* (get_hccl_comm_name returns a name derived from
+        # it alone). Static names would make a rebuilt connector collide with
+        # the retired generation's registry entries and silently exchange data
+        # through the old, wrong-topology communicators. Every elastic resize
+        # allocates a fresh rendezvous port shared by both roles via the afd
+        # config, so embedding it keeps the names unique per generation yet
+        # identical across all participating processes.
+        generation_suffix = f"_{self.afd_config.port}"
         self.afd_pg_list = []
         self.hccl_comm_name_list = []
         for ubatch_idx in range(num_ubatches):
@@ -422,7 +431,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
                 init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
                 world_size=self.ffn_size + self.attn_size,
                 rank=self.world_rank,
-                group_name=group_name,
+                group_name=f"{group_name}{generation_suffix}",
                 timeout=timedelta(minutes=30),
                 pg_options=create_hccl_process_group_options(
                     self.hccl_buffer_size_mb,
@@ -446,7 +455,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
                 init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
                 world_size=self.ffn_size,
                 rank=self.world_rank,
-                group_name="afd_moe",
+                group_name=f"afd_moe{generation_suffix}",
                 timeout=timedelta(minutes=30),
                 pg_options=create_hccl_process_group_options(
                     self.hccl_buffer_size_mb,
@@ -463,7 +472,7 @@ class CAMP2pAFDConnector(AFDConnectorBase):
                 init_method=f"tcp://{self.afd_config.host}:{self.afd_config.port}",
                 world_size=self.topology.p2p_world_size,
                 rank=self.p2p_rank,
-                group_name="p2p",
+                group_name=f"p2p{generation_suffix}",
                 timeout=timedelta(minutes=30),
             )
 

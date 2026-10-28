@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import os
+import threading
 from typing import TYPE_CHECKING
 
 import vllm.v1.engine.utils as upstream
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.engine.utils import CoreEngineActorManager, EngineZmqAddresses
 from vllm.v1.executor import Executor
 
@@ -15,6 +19,8 @@ from afd_plugin.elastic.config import is_elastic_attention
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+
+logger = init_logger(__name__)
 
 
 # Patch reason: EEP's used-device local-rank arithmetic includes colocated F.
@@ -27,7 +33,7 @@ def __init__(
     addresses: EngineZmqAddresses,
     executor_class: type[Executor],
     log_stats: bool,
-    placement_groups: list["PlacementGroup"] | None = None,
+    placement_groups: list[PlacementGroup] | None = None,
     local_dp_ranks: list[int] | None = None,
 ):
     import copy
@@ -35,7 +41,6 @@ def __init__(
     import ray
     from ray.runtime_env import RuntimeEnv
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
     from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
 
     dp_size = vllm_config.parallel_config.data_parallel_size
@@ -113,7 +118,7 @@ def __init__(
     self.placement_group_is_local = []
     refs = []
     for index, local_index, pg in zip(
-        range(dp_size), local_dp_ranks, placement_groups
+        range(dp_size), local_dp_ranks, placement_groups, strict=False
     ):
         dp_vllm_config = copy.deepcopy(vllm_config)
         if dp_size > 1:
@@ -180,13 +185,10 @@ def scale_up_elastic_ep(
     import ray
     from ray.runtime_env import RuntimeEnv
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
     from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
 
     actor_class = (
-        DPMoEEngineCoreActor
-        if cur_vllm_config.model_config.is_moe
-        else EngineCoreActor
+        DPMoEEngineCoreActor if cur_vllm_config.model_config.is_moe else EngineCoreActor
     )
     # ### PATCH START: AFD actor uses its actual Ray GPU bundle assignment.
     if is_elastic_attention(cur_vllm_config):
@@ -216,7 +218,9 @@ def scale_up_elastic_ep(
     runtime_env = RuntimeEnv(
         env_vars=self.env_vars_dict | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"}
     )
-    for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
+    for i, (pg, local_rank) in enumerate(
+        zip(placement_groups, local_dp_ranks, strict=False)
+    ):
         rank = cur_data_parallel_size + i
         dp_vllm_config = copy.deepcopy(cur_vllm_config)
         if new_data_parallel_size > 1:

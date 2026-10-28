@@ -103,9 +103,7 @@ class AFDElasticEndpointPlugin:
                 )
                 break
         else:
-            raise RuntimeError(
-                "The vLLM /scale_elastic_ep route was not installed"
-            )
+            raise RuntimeError("The vLLM /scale_elastic_ep route was not installed")
 
     async def init_state(
         self, engine_client: EngineClient | None, state: State, args: Namespace

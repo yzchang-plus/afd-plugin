@@ -16,8 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from afd_plugin.config import parse_afd_config
-
 ROOT = Path(__file__).parents[3]
 
 
@@ -116,9 +114,7 @@ def npu(monkeypatch):
             "unlock_workspace": unlock,
             "lock_workspace": lambda: events.append("lock"),
         },
-        "vllm.v1.worker.gpu_ubatch_wrapper": {
-            "UBatchWrapper": AscendUBatchWrapper
-        },
+        "vllm.v1.worker.gpu_ubatch_wrapper": {"UBatchWrapper": AscendUBatchWrapper},
         "vllm_ascend.compilation": vllm_ascend_compilation,
         "afd_plugin.connectors": {
             "AFDConnectorFactory": None,
@@ -173,6 +169,7 @@ def test_release_drops_acl_graphs_before_closing_connector(npu, config):
     events = npu.events
     retired_params = npu.acl_graph._graph_params
     retired_pool = npu.platform._global_graph_pool
+
     class Graph:
         pass
 
@@ -180,11 +177,11 @@ def test_release_drops_acl_graphs_before_closing_connector(npu, config):
     old_graph = weakref.ref(graph)
 
     class ACLGraphWrapperDouble:
-        def __init__(self):
-            self.concrete_aclgraph_entries = {8: graph}
+        def __init__(self, entries):
+            self.concrete_aclgraph_entries = entries
             self.graph_pool = retired_pool
 
-    wrapper = ACLGraphWrapperDouble()
+    wrapper = ACLGraphWrapperDouble({8: graph})
     npu.wrappers.add(wrapper)
     model = SimpleNamespace()
     del graph
@@ -283,9 +280,7 @@ def test_finish_releases_old_kv_before_allocating_and_enables_real_warmup(npu):
     worker.compile_or_warm_up_model = lambda: events.append("warmup")
     npu.module.finish_attention(worker)
     assert (
-        events.index("allocate_kv")
-        < events.index("profile")
-        < events.index("warmup")
+        events.index("allocate_kv") < events.index("profile") < events.index("warmup")
     )
     assert events[-2:] == ["lock", "sync"]
 

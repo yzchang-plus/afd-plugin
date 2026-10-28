@@ -252,9 +252,7 @@ class AFDNPUFFNWorker(NPUWorker):
         if thread is not None:
             thread.join(timeout=timeout)
             if thread.is_alive():
-                raise TimeoutError(
-                    "AFD NPU FFN worker loop did not acknowledge STOP"
-                )
+                raise TimeoutError("AFD NPU FFN worker loop did not acknowledge STOP")
         self.raise_ffn_loop_error_if_any()
         self._ffn_thread = None
         self._ffn_shutdown_event = None

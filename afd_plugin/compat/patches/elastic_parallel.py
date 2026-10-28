@@ -77,9 +77,7 @@ def __post_init__(self) -> None:
         if not self.enable_elastic_ep:
             if not self._data_parallel_master_port_list:
                 self._data_parallel_master_port_list = get_open_ports_list(5)
-            self.data_parallel_master_port = (
-                self._data_parallel_master_port_list.pop()
-            )
+            self.data_parallel_master_port = self._data_parallel_master_port_list.pop()
 
         if not (0 <= self.data_parallel_rank < self.data_parallel_size):
             raise ValueError(
@@ -96,8 +94,7 @@ def __post_init__(self) -> None:
 
         if self.data_parallel_size > 1 and self.is_moe_model is False:
             raise ValueError(
-                "Offline data parallel mode is not supported/useful"
-                " for dense models."
+                "Offline data parallel mode is not supported/useful for dense models."
             )
 
     max_dp_size = self.elastic_ep_max_dp_size
@@ -144,8 +141,7 @@ def __post_init__(self) -> None:
             )
         elif self.data_parallel_backend == "ray":
             logger.info(
-                "Using ray distributed inference because "
-                "data_parallel_backend is ray"
+                "Using ray distributed inference because data_parallel_backend is ray"
             )
             backend = "ray"
         elif ray_found:
@@ -171,10 +167,7 @@ def __post_init__(self) -> None:
             "not supported and will be ignored."
         )
     allowed_backends = ("mp", "uni", "external_launcher")
-    if (
-        self.distributed_executor_backend not in allowed_backends
-        and self.nnodes > 1
-    ):
+    if self.distributed_executor_backend not in allowed_backends and self.nnodes > 1:
         raise ValueError(
             "nnodes > 1 can only be set when distributed executor "
             "backend is mp, uni or external_launcher."

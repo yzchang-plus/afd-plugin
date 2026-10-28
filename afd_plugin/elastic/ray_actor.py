@@ -14,7 +14,6 @@ from vllm.v1.executor import Executor
 
 def assigned_bundle_devices() -> list[str]:
     import ray
-
     from vllm.platforms import current_platform
 
     return ray.get_runtime_context().get_accelerator_ids()[
@@ -53,7 +52,6 @@ class AFDEngineCoreActor(DPMoEEngineCoreActor):
     def _set_visible_devices(self, vllm_config: VllmConfig, local_dp_rank: int):
         import ray
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
         from vllm.platforms import current_platform
 
         device_key = current_platform.ray_device_key

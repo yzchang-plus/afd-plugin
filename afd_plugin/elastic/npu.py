@@ -158,9 +158,7 @@ class AFDElasticNPUExecutor(AFDElasticGPUExecutor):
         torch.npu.empty_cache()
         # Runner.shutdown resets the process workspace. Worker.init_device is
         # deliberately not rerun while EEP switches the existing device groups.
-        init_workspace_manager(
-            worker.device, npu_afd_num_ubatches(worker.vllm_config)
-        )
+        init_workspace_manager(worker.device, npu_afd_num_ubatches(worker.vllm_config))
         _replace_active_groups(**pop_standby_groups())
         parallel = worker.parallel_config
         parallel.data_parallel_size = request.new_data_parallel_size

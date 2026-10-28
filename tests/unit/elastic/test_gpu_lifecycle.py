@@ -264,9 +264,7 @@ def test_finish_releases_old_kv_before_allocating_and_enables_real_warmup(gpu):
     worker.compile_or_warm_up_model = lambda: events.append("warmup")
     gpu.module.finish_attention(worker)
     assert (
-        events.index("allocate_kv")
-        < events.index("profile")
-        < events.index("warmup")
+        events.index("allocate_kv") < events.index("profile") < events.index("warmup")
     )
     assert events[-2:] == ["lock", "sync"]
 

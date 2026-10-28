@@ -42,9 +42,7 @@ class FFNActor:
         import ray
 
         device_key, env_var = _device_attribution()
-        self.device_ids = ray.get_runtime_context().get_accelerator_ids()[
-            device_key
-        ]
+        self.device_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
         os.environ[env_var] = ",".join(self.device_ids)
         os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "0"
         self.executor: Executor | None = None
@@ -89,9 +87,8 @@ class FFNActorManager:
     async def resize_actors(self, size: int) -> None:
         import ray
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-        from vllm.ray.ray_env import get_env_vars_to_copy
-
         from vllm.platforms import current_platform
+        from vllm.ray.ray_env import get_env_vars_to_copy
 
         # Existing roles have already been released collectively before removal.
         # On Ascend, a reused FFN actor process cannot re-establish its HCCL
@@ -99,9 +96,7 @@ class FFNActorManager:
         # a kept rank never meets the fresh rank's (hcclCommInitRootInfoConfig
         # stalls until the 180 s timeout), so every NPU resize replaces the
         # whole actor set with fresh processes (weight reload ~15 s per rank).
-        replace_all = (
-            current_platform.device_type == "npu" and len(self.actors) != size
-        )
+        replace_all = current_platform.device_type == "npu" and len(self.actors) != size
         while replace_all and len(self.actors) > 0:
             ray.kill(self.actors.pop())
             ray.util.remove_placement_group(self.placement_groups.pop())

@@ -37,6 +37,7 @@ from afd_plugin.v1.worker.attention_metadata import (
 from afd_plugin.v1.worker.cuda_graph import (
     AFDGraphRunMode,
     graph_run_mode,
+    make_ffn_graph_key,
 )
 from afd_plugin.v1.worker.ffn_metadata import _set_moe_layer_index
 from afd_plugin.validation import validate_npu_model_runner_v2_config

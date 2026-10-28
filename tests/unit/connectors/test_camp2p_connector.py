@@ -262,7 +262,7 @@ def _init_ffn_connector(rank, vllm_config):
     return connector
 
 
-def test_camp2p_recv_attn_output_uses_kernel_strided_af_grouping(monkeypatch):
+def test_camp2p_recv_attn_output_matches_uniform_attention_publication(monkeypatch):
     torch = pytest.importorskip("torch")
 
     monkeypatch.setattr(
@@ -280,11 +280,14 @@ def test_camp2p_recv_attn_output_uses_kernel_strided_af_grouping(monkeypatch):
     context0 = rank0.recv_attn_output(ubatch_idx=0, layer_idx=3).context
     context1 = rank1.recv_attn_output(ubatch_idx=0, layer_idx=3).context
 
-    assert context0.metadata.seq_lens == [7]
-    assert context1.metadata.seq_lens == [10]
+    # The a2e kernel reads an equal share of rows from every Attention rank
+    # and send_attn_output pads each rank up to the largest count, so every
+    # FFN rank receives uniform * (attn_size / ffn_size) rows: 7 * 2 = 14.
+    assert context0.metadata.seq_lens == [14]
+    assert context1.metadata.seq_lens == [14]
     assert isinstance(context0.states, CAMP2PTransferState)
     assert isinstance(context0.states, AFDTransferState)
-    assert context0.states.batch_size == 7
+    assert context0.states.batch_size == 14
     assert context0.states.h == 16
     assert context0.states.k == 2
 
@@ -382,7 +385,8 @@ def test_camp2p_connector_uses_role_specific_core_num(monkeypatch):
     states = connector.recv_attn_output(ubatch_idx=0, layer_idx=3).context.states
 
     assert states.k == 2
-    assert states.batch_size == 7
+    # Uniform Attention publication: max([2, 3, 5, 7]) * (4 / 2) rows.
+    assert states.batch_size == 14
     # The ffn_core_num override applies because this is an FFN-role connector.
     assert states.aiv_num == 13
 

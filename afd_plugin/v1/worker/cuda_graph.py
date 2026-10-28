@@ -107,8 +107,15 @@ def make_ffn_graph_key(
     attention_size: int | None = None,
     ffn_size: int | None = None,
     fallback: int = 1,
+    uniform_padding: bool = False,
 ) -> tuple[tuple[int, tuple]]:
-    """Extract the AFD FFN graph hashable key from DP metadata."""
+    """Extract the AFD FFN graph hashable key from DP metadata.
+
+    ``uniform_padding`` selects the NPU CAMP2p row-count semantics: the
+    Attention side pads every rank to the largest count, so each FFN rank
+    receives ``uniform * group_size`` rows.  The default keeps the GPU
+    contiguous-grouping sum.
+    """
 
     key_parts: list[tuple[int, tuple]] = []
     for stage_idx, metadata in sorted(dp_metadata_list.items()):
@@ -128,6 +135,7 @@ def make_ffn_graph_key(
                     attention_size=int(attention_size),
                     ffn_size=int(ffn_size),
                     fallback=int(fallback),
+                    uniform_padding=uniform_padding,
                 )
         key_parts.append((int(stage_idx), values_tuple))
     return tuple(key_parts)
@@ -180,6 +188,7 @@ def _aggregate_ffn_values_tuple(
     attention_size: int,
     ffn_size: int,
     fallback: int,
+    uniform_padding: bool = False,
 ) -> tuple[int, ...]:
     # Expand DP-level values to AFD-level when TP > 1.
     # With TP > 1, attention_size = num_attention_ranks includes TP workers
@@ -193,6 +202,15 @@ def _aggregate_ffn_values_tuple(
     if len(expanded) < attention_size:
         return tuple(max(1, int(fallback)) for _ in range(ffn_size))
     group_size = attention_size // ffn_size
+    if uniform_padding and group_size > 1:
+        # N:1 mapping with uniform padding (NPU CAMP2p): the Attention side
+        # pads every rank up to the largest count across all Attention
+        # ranks, so every FFN rank receives ``uniform * group_size`` rows.
+        # Must stay in sync with the NPU runner's token aggregation: a
+        # replayed graph must have been captured for exactly the row count
+        # the current step produces.
+        uniform = max(1, max(expanded))
+        return tuple(uniform * group_size for _ in range(ffn_size))
     return tuple(
         max(1, sum(expanded[idx * group_size : (idx + 1) * group_size]))
         for idx in range(ffn_size)

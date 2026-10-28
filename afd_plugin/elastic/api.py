@@ -104,14 +104,14 @@ class AFDElasticEndpointPlugin:
                 break
         else:
             raise RuntimeError(
-                "The vLLM 0.26 /scale_elastic_ep route was not installed"
+                "The vLLM /scale_elastic_ep route was not installed"
             )
 
     async def init_state(
         self, engine_client: EngineClient | None, state: State, args: Namespace
     ) -> None:
         assert engine_client is not None
-        # v0.26 build_app installs ScalingMiddleware *after* attach_router.
+        # Upstream build_app installs ScalingMiddleware *after* attach_router.
         # Phase B runs after build_app and before the ASGI middleware stack is
         # built, so replace it here rather than missing the not-yet-added entry.
         for index, middleware in enumerate(self.app.user_middleware):

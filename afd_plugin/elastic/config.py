@@ -103,11 +103,14 @@ def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
         ffn_tp,
     )
     topology.validate()
-    if config.use_v2_model_runner:
-        raise ValueError("Elastic AFD requires VLLM_USE_V2_MODEL_RUNNER=0")
+    if not config.use_v2_model_runner:
+        raise ValueError(
+            "Elastic AFD requires the vLLM ModelRunnerV2 stack "
+            "(VLLM_USE_V2_MODEL_RUNNER=1, the default since vLLM 0.30)."
+        )
     if not config.model_config.enforce_eager:
         validate_cuda_graph_mode(config, role="attention")
-        # vLLM 0.26 GPUModelRunner.load_model returns before installing its
+        # Upstream GPUModelRunner.load_model may return before installing its
         # CUDAGraphWrapper in STOCK_TORCH_COMPILE mode. F must not capture
         # communication while A executes an unwrapped forward.
         if config.compilation_config.mode.name == "STOCK_TORCH_COMPILE":

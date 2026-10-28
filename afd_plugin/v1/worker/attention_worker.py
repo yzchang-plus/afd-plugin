@@ -58,7 +58,7 @@ class AFDAttentionWorker(Worker):
             self.elastic_ep_executor = AFDElasticGPUExecutor(self)
 
     # Native explicit KV budgets still run profile. Delay that forward until F
-    # is receiving. Signature matches vLLM 0.26 Worker.determine_available_memory.
+    # is receiving. Signature matches vLLM 0.30.0 Worker.determine_available_memory.
     def determine_available_memory(self) -> int:
         # ### PATCH START: defer AFD forward until cross-role rendezvous.
         if self.afd_runtime_deferred:
@@ -69,7 +69,7 @@ class AFDAttentionWorker(Worker):
         return super().determine_available_memory()
 
     # Preserve the complete upstream allocator/KV-zero/input initialization.
-    # Signature matches vLLM 0.26 Worker.initialize_from_config.
+    # Signature matches vLLM 0.30.0 Worker.initialize_from_config.
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         # ### PATCH START: save config, never retain an old KV tensor allocation.
         if is_elastic_attention(self.vllm_config):

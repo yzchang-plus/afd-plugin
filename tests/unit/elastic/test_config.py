@@ -38,17 +38,17 @@ def test_eager_dbo_config(config):
     assert validate_elastic_config(config) == ElasticTopology(2, 1)
 
 
-def test_dbo_graphs_rejected_before_role_initialization(config):
+@pytest.mark.parametrize("mode", ["NONE", "VLLM_COMPILE"])
+def test_dbo_graph_config(config, mode):
     config.parallel_config.enable_dbo = True
     config.parallel_config.use_ubatching = True
     config.parallel_config.num_ubatches = 2
     config.model_config.enforce_eager = False
     config.compilation_config = SimpleNamespace(
-        mode=SimpleNamespace(name="NONE"),
+        mode=SimpleNamespace(name=mode),
         cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
     )
-    with pytest.raises(ValueError, match="--enable-dbo --enforce-eager"):
-        validate_elastic_config(config)
+    assert validate_elastic_config(config) == ElasticTopology(2, 1)
 
 
 def test_stock_compile_graph_rejected_before_role_initialization(config):

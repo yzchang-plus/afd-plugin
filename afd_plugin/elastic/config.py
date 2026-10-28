@@ -131,12 +131,8 @@ def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
         or afd.async_dp
     ):
         raise ValueError("Elastic AFD requires PP=PCP=DCP=1 and synchronous DP")
-    if parallel.use_ubatching and (
-        not parallel.enable_dbo or not config.model_config.enforce_eager
-    ):
-        raise ValueError(
-            "Elastic AFD ubatching currently requires --enable-dbo --enforce-eager"
-        )
+    if parallel.use_ubatching and not parallel.enable_dbo:
+        raise ValueError("Elastic AFD ubatching requires --enable-dbo")
     if not config.cache_config.kv_cache_memory_bytes:
         raise ValueError("Elastic AFD requires an explicit --kv-cache-memory-bytes")
     if (

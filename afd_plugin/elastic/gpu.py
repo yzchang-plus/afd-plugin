@@ -20,6 +20,7 @@ from vllm.distributed.elastic_ep.standby_state import (
 )
 from vllm.distributed.parallel_state import _replace_active_groups
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
     lock_workspace,
@@ -52,6 +53,10 @@ def release_link(worker: AFDAttentionWorker | AFDFFNWorker) -> None:
     if worker.afd_expected_role == "attention":
         worker.afd_runtime_deferred = True
         runner._afd_pending_metadata = None
+        # DBO owns a separate cache outside CUDAGraphWrapper's registry.
+        # F-only resize retains this wrapper but replaces its A/F connector.
+        if isinstance(runner.model, UBatchWrapper):
+            runner.model.clear_graphs()
         with set_current_vllm_config(worker.vllm_config):
             reset_compile_wrapper(runner.get_model())
     else:

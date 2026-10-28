@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import sys
 import types
+import weakref
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -33,6 +34,14 @@ def gpu(monkeypatch):
     class Base:
         def __init__(self, worker):
             self.worker = worker
+
+    class UBatchWrapper:
+        def __init__(self):
+            self.cudagraphs = {}
+
+        def clear_graphs(self):
+            self.cudagraphs.clear()
+            events.append("clear_dbo_graphs")
 
     def create_groups(**kwargs):
         assert not kwargs["enable_eplb"]
@@ -74,6 +83,7 @@ def gpu(monkeypatch):
             "unlock_workspace": unlock,
             "lock_workspace": lambda: events.append("lock"),
         },
+        "vllm.v1.worker.gpu_ubatch_wrapper": {"UBatchWrapper": UBatchWrapper},
         "afd_plugin.connectors": {
             "AFDConnectorFactory": None,
             "AFDControlPayload": lambda *args, **kwargs: SimpleNamespace(**kwargs),
@@ -89,6 +99,44 @@ def gpu(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return SimpleNamespace(module=module, events=events, workspace=workspace)
+
+
+@pytest.mark.parametrize("enable_dbo", [False, True])
+def test_release_drops_dbo_graphs_before_closing_connector(gpu, config, enable_dbo):
+    class Graph:
+        pass
+
+    model = gpu.module.UBatchWrapper() if enable_dbo else SimpleNamespace()
+    graph = Graph()
+    old_graph = weakref.ref(graph)
+    if enable_dbo:
+        model.cudagraphs[8] = graph
+    del graph
+
+    def close():
+        assert old_graph() is None, "graph still holds the old communicator"
+        gpu.events.append("close_connector")
+
+    runner = SimpleNamespace(
+        model=model,
+        get_model=lambda: model,
+        connector=SimpleNamespace(close=close),
+        _afd_pending_metadata="old",
+    )
+    worker = SimpleNamespace(
+        model_runner=runner,
+        device="cuda:0",
+        vllm_config=config,
+        afd_expected_role="attention",
+        afd_runtime_deferred=False,
+    )
+    gpu.module.release_link(worker)
+    assert runner.model is model  # F-only resize keeps A's wrapper.
+    assert worker.afd_runtime_deferred and runner._afd_pending_metadata is None
+    if enable_dbo:
+        assert gpu.events.index("clear_dbo_graphs") < gpu.events.index(
+            "close_connector"
+        )
 
 
 @pytest.mark.parametrize("role", ["attention", "ffn"])

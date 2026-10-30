@@ -432,6 +432,22 @@ def apply_afd_stateless_pg_patches() -> bool:
     # --- 3: standby-group communicator symbol swap ---
     stateless_coordinator.CudaCommunicator = NPUCommunicator
 
+    # --- 3b: all2all manager shim for the new elastic prepare contract ---
+    # vllm main@544f's elastic prepare calls all2all_manager.stage_ep_size()
+    # (All2AllManagerBase API); ascend's _NpuAll2AllManager is a deliberate
+    # no-op placeholder (NPU MoE uses mc2/all_gather, no all2all state to
+    # stage), so the no-op shim is the semantically correct NPU behavior.
+    from vllm_ascend.distributed.device_communicators.npu_communicator import (
+        _NpuAll2AllManager,
+    )
+
+    if not hasattr(_NpuAll2AllManager, "stage_ep_size"):
+
+        def _noop_stage_ep_size(self) -> None:
+            return None
+
+        _NpuAll2AllManager.stage_ep_size = _noop_stage_ep_size
+
     # --- 4: communicator stateless signature + direct PGHCCL routing ---
     if not comm_absorbed:
         NPUCommunicator.__init__ = _npu_communicator_init

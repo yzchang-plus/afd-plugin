@@ -96,6 +96,14 @@ def __init__(
     if core_module.envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
         self._eep_scale_up_before_kv_init()
 
+    # Re-anchor main@544f182d: stock __init__ measures encoder output widths
+    # before KV init; guarded so pre-0.31 cores without the helper still boot.
+    _measure_encoder_output_widths = getattr(
+        core_module, "measure_encoder_output_widths", None
+    )
+    if _measure_encoder_output_widths is not None:
+        _measure_encoder_output_widths(vllm_config, self.collective_rpc)
+
     # Setup KV Caches and update CacheConfig after profiling.
     kv_cache_config = self._initialize_kv_caches(vllm_config)
     self.structured_output_manager = core_module.StructuredOutputManager(vllm_config)
@@ -126,6 +134,10 @@ def __init__(
         block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
     )
+    # Re-anchor main@544f182d: stock derives the effective attention block
+    # size right after scheduler construction.
+    if hasattr(self, "_initialize_effective_attention_block_size"):
+        self._initialize_effective_attention_block_size()
     self.use_spec_decode = vllm_config.speculative_config is not None
     self.check_for_draft_tokens = (
         self.use_spec_decode or vllm_config.model_config.is_diffusion
@@ -182,6 +194,10 @@ def __init__(
             self.batch_queue_size,
         )
         self.batch_queue = deque(maxlen=self.batch_queue_size)
+
+    # Re-anchor main@544f182d: step_with_batch_queue reads this flag each
+    # step; the 0.30-generation seam copy predates it.
+    self.is_mm_encoder_only = getattr(vllm_config, "is_mm_encoder_only", False)
 
     self.is_ec_consumer = (
         vllm_config.ec_transfer_config is None

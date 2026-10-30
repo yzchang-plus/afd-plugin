@@ -511,6 +511,26 @@ def apply_afd_stateless_pg_patches() -> bool:
     # --- 2b: socket range ahead of the first in-process HCCL comm ---
     NPUWorker._init_device = _wrap_init_device(NPUWorker._init_device)
 
+    # --- 9: harden torch's c10d exception logger against stateless groups ---
+    # When a wrapped collective raises, torch's _exception_logger builds a
+    # message dict via dist.get_backend(group) — which itself raises for
+    # vllm's stateless groups (unregistered in _world) and REPLACES the
+    # original error. Degrade gracefully so real failures stay visible
+    # (this bit us in _warm_target_groups over standby dp/ep groups).
+    import torch.distributed.c10d_logger as c10d_logger_mod
+
+    if not getattr(c10d_logger_mod._get_msg_dict, "_afd_hardened", False):
+        _original_msg_dict = c10d_logger_mod._get_msg_dict
+
+        def _safe_msg_dict(func_name, *args: Any, **kwargs: Any):
+            try:
+                return _original_msg_dict(func_name, *args, **kwargs)
+            except Exception:
+                return {"func_name": f"{func_name}"}
+
+        _safe_msg_dict._afd_hardened = True
+        c10d_logger_mod._get_msg_dict = _safe_msg_dict
+
     # --- 8: thread-local TCPStore clients (uni-executor self-deadlock) ---
     import importlib
     import sys as _sys

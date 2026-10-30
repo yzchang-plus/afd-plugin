@@ -122,6 +122,15 @@ def factory_namespace():
 
 
 def lifecycle_probe(role, dbo, *, serialized=None, fail=False):
+    # load_functions strips module imports, so the exec'd create_engine_config
+    # resolves its elastic-gate block from this namespace. Without the real
+    # symbols the probe dies with NameError before reaching the assertions.
+    from afd_plugin.elastic.config import (
+        is_elastic_attention,
+        is_elastic_attention_worker,
+        validate_elastic_config,
+    )
+
     events = []
     namespace_calls = []
     cached_configs = set()
@@ -223,6 +232,7 @@ def lifecycle_probe(role, dbo, *, serialized=None, fail=False):
                 ubatch_size=args.ubatch_size,
                 all2all_backend=args.all2all_backend,
                 worker_cls=args.worker_cls,
+                enable_elastic_ep=False,
             ),
             capture_sizes=[1, 2, 4, 8],
         )
@@ -231,6 +241,12 @@ def lifecycle_probe(role, dbo, *, serialized=None, fail=False):
         return config
 
     ns: dict[str, Any] = {
+        # Elastic gate symbols referenced by create_engine_config's body
+        # (probe configs are never elastic: enable_elastic_ep=False below).
+        "is_elastic_attention": is_elastic_attention,
+        "is_elastic_attention_worker": is_elastic_attention_worker,
+        "validate_elastic_config": validate_elastic_config,
+        "os": os,
         "_original_create_engine_config": native_create,
         "_original_vllm_config_post_init": native_post_init,
         "_is_target_vllm_compatible": lambda: True,

@@ -364,6 +364,41 @@ def _wrap_init_device(original):
     return _init_device
 
 
+def _make_thread_local_store_client(original):
+    """Per-thread replacement for vllm's process-wide lru_cache'd store client.
+
+    Re-anchor main@544f182d + UniProcExecutor topology: vllm assumes elastic
+    EP workers run in their own processes, so ``get_cached_tcp_store_client``
+    caches ONE TCPStore per (host, port) per process. Under AFD NPU (ray
+    actor per DP rank, uni executor) the engine-side
+    ``coord_store.wait(done_keys)`` (300 s) and the worker-side
+    ``coord_store.set(...)`` that would release it share that single client
+    object; torch's TCPStore serializes operations on it, so the wait blocks
+    the set — a self-deadlock observed live (worker frozen at
+    ``coord_store.set("world_0")`` while the engine waited on
+    ``/eep_async/prepare_reconfiguration/*``). Thread-local clients are cheap
+    and independent; per-thread maxsize mirrors the original lru_cache(1).
+    """
+    import threading
+
+    tls = threading.local()
+
+    def thread_cached_tcp_store_client(host: str, port: int):
+        entry = getattr(tls, "entry", None)
+        if entry is None or entry[0] != (host, port):
+            from torch.distributed import TCPStore
+
+            entry = (
+                (host, port),
+                TCPStore(host, port, is_master=False, wait_for_workers=False),
+            )
+            tls.entry = entry
+        return entry[1]
+
+    thread_cached_tcp_store_client._afd_original = original
+    return thread_cached_tcp_store_client
+
+
 def apply_afd_stateless_pg_patches() -> bool:
     """Apply every patch in this module. Idempotent; loud on anchor drift.
 
@@ -475,6 +510,36 @@ def apply_afd_stateless_pg_patches() -> bool:
 
     # --- 2b: socket range ahead of the first in-process HCCL comm ---
     NPUWorker._init_device = _wrap_init_device(NPUWorker._init_device)
+
+    # --- 8: thread-local TCPStore clients (uni-executor self-deadlock) ---
+    import importlib
+    import sys as _sys
+
+    import vllm.distributed.utils as dist_utils
+
+    original_client = dist_utils.get_cached_tcp_store_client
+    if not hasattr(original_client, "_afd_original"):
+        replacement = _make_thread_local_store_client(original_client)
+        # Defining module (covers the function-level from-imports in
+        # standby_state / elastic_execute, which resolve per call)...
+        dist_utils.get_cached_tcp_store_client = replacement
+        # ...plus every module-level binding that captured the original.
+        for mod_name in (
+            "vllm.distributed.elastic_ep.elastic_state",
+            "vllm.distributed.elastic_ep.elastic_execute",
+            "vllm.distributed.elastic_ep.standby_state",
+            "vllm.distributed.elastic_ep.external_elastic_ep",
+            "vllm.distributed.parallel_state",
+            "vllm.config.parallel",
+        ):
+            mod = _sys.modules.get(mod_name)
+            if mod is None:
+                try:
+                    mod = importlib.import_module(mod_name)
+                except ImportError:
+                    continue
+            if getattr(mod, "get_cached_tcp_store_client", None) is original_client:
+                mod.get_cached_tcp_store_client = replacement
 
     setattr(NPUPlatform, _PATCH_ATTR, True)
     return True

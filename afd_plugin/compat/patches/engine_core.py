@@ -135,8 +135,19 @@ def __init__(
     if self.scheduler.ec_connector is not None:  # type: ignore
         self.model_executor.init_ec_output_aggregator()
 
-    mm_registry = core_module.MULTIMODAL_REGISTRY
-    self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(vllm_config)
+    # Re-anchor for post-0.30 main: the receiver-cache factory is a free
+    # function imported into vllm.v1.engine.core; the 0.30 generation
+    # reached it through the core module's MULTIMODAL_REGISTRY re-export.
+    _receiver_cache_factory = getattr(
+        core_module, "engine_receiver_cache_from_config", None
+    )
+    if _receiver_cache_factory is not None:
+        self.mm_receiver_cache = _receiver_cache_factory(vllm_config)
+    else:
+        mm_registry = core_module.MULTIMODAL_REGISTRY
+        self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
+            vllm_config
+        )
 
     # If a KV connector is initialized for scheduler, we want to collect
     # handshake metadata from all workers so the connector in the scheduler

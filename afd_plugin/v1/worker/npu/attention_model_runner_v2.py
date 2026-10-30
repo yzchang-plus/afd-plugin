@@ -11,7 +11,7 @@ from types import MethodType
 from typing import TYPE_CHECKING
 
 import torch
-from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import ForwardContext
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -20,7 +20,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu import cudagraph_utils as v2_cudagraph_utils
 from vllm.v1.worker.gpu import model_runner as v2_model_runner
-from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
 from afd_plugin.compat.npu import fail_if_unsupported_npu_afd_features
@@ -148,7 +147,10 @@ def _use_camp2p_dp_padding(attention_size: int, ffn_size: int) -> Iterator[None]
     # Patch reason: native execute calls this module-level function before input
     # preparation; no runner method exposes that boundary.
     # Patch functionality: apply CAMP2P group padding to the agreed eager batch.
-    # Signature: matches vLLM v0.30.0 dispatch_cg_and_sync_dp exactly.
+    # Signature: pass-through — re-anchored for main@544f182d, whose stock
+    # tail keeps evolving (allow_skip_drafts added, dp_sync renamed to
+    # dp_sync_state). The padding below needs only dp_size/dp_rank and the
+    # returned descriptor/sync, so the tail is forwarded untouched.
     # Upstream source: vllm/v1/worker/gpu/dp_utils.py;
     # ced6857afa0ea7b2e3f0846a62e1394e90f15607.
     # Delegation exception: preserve native graph selection and DP collectives.
@@ -160,14 +162,9 @@ def _use_camp2p_dp_padding(attention_size: int, ffn_size: int) -> Iterator[None]
         uniform_token_count: int | None,
         dp_size: int,
         dp_rank: int,
-        max_query_len: int | None = None,
-        need_eager: bool = False,
-        num_active_loras: int = 0,
-        parallel_config: ParallelConfig | None = None,
-        allow_ubatching: bool = False,
-        uniform_decode: bool = False,
-        dp_sync: DPSyncState | None = None,
-    ) -> tuple[v2_cudagraph_utils.BatchExecutionDescriptor, DPSyncState | None]:
+        *extra_args,
+        **extra_kwargs,
+    ):
         desc, sync = original_dispatch(
             cudagraph_manager,
             num_reqs,
@@ -175,13 +172,8 @@ def _use_camp2p_dp_padding(attention_size: int, ffn_size: int) -> Iterator[None]
             uniform_token_count,
             dp_size,
             dp_rank,
-            max_query_len=max_query_len,
-            need_eager=need_eager,
-            num_active_loras=num_active_loras,
-            parallel_config=parallel_config,
-            allow_ubatching=allow_ubatching,
-            uniform_decode=uniform_decode,
-            dp_sync=dp_sync,
+            *extra_args,
+            **extra_kwargs,
         )
         # ### PATCH START: equal CAMP2P strides for eager and graph fallback.
         if desc.cg_mode == CUDAGraphMode.NONE and sync is not None:

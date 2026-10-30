@@ -159,7 +159,10 @@ def use_async_cam_dbo_dispatch() -> Iterator[None]:
     # Patch reason: native dispatch returns early at DP=1 before DBO selection.
     # Patch functionality: apply native eligibility and thresholds at DP=1;
     # native dispatch continues to own every DP>1 descriptor.
-    # Signature matches dispatch_cg_and_sync_dp at ced6857a.
+    # Signature: named parameters this wrapper's own gate reads, then a
+    # pass-through tail — re-anchored for main@544f182d (allow_skip_drafts
+    # added, dp_sync renamed to dp_sync_state); the forwarded tail is not
+    # inspected here, so upstream may keep evolving it.
     # Delegation exception: native descriptor/threshold selection stays upstream.
     # Removal plan: remove when native dispatch supports local DP=1 DBO.
     def dispatch_cg_and_sync_dp(
@@ -175,7 +178,8 @@ def use_async_cam_dbo_dispatch() -> Iterator[None]:
         parallel_config: ParallelConfig | None = None,
         allow_ubatching: bool = False,
         uniform_decode: bool = False,
-        dp_sync: DPSyncState | None = None,
+        *extra_args,
+        **extra_kwargs,
     ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
         desc, sync = original_dispatch(
             cudagraph_manager,
@@ -190,7 +194,8 @@ def use_async_cam_dbo_dispatch() -> Iterator[None]:
             parallel_config=parallel_config,
             allow_ubatching=allow_ubatching,
             uniform_decode=uniform_decode,
-            dp_sync=dp_sync,
+            *extra_args,
+            **extra_kwargs,
         )
         # ### PATCH START: native DBO eligibility without a DP handshake.
         if (

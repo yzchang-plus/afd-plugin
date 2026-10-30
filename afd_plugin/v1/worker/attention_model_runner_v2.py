@@ -39,6 +39,7 @@ from afd_plugin.connectors import (
     AFDConnectorFactory,
     AFDForwardContextMetadata,
 )
+from afd_plugin.elastic.config import is_elastic_attention
 from afd_plugin.model_executor.models.forward_context import use_afd_metadata_provider
 from afd_plugin.v1.worker.attention_metadata import (
     AFDMetadataProviderMixin,
@@ -458,8 +459,17 @@ class AFDAttentionModelRunnerV2(AFDMetadataProviderMixin, GPUModelRunnerV2):
         **kwargs,
     ) -> None:
         super().load_model(load_dummy_weights, *args, **kwargs)
-        if not self.connector.is_initialized:
-            self.connector.init_afd_connector()
+        # ### PATCH START: elastic attention defers the connector rendezvous.
+        # Mechanism: the vLLM 0.30 launcher waits for the A engine to build
+        # synchronously, while init_afd_connector() collectively waits for F,
+        # which the client only pulls after this returns — boot deadlocks.
+        # v0.26 origin: the MRV1 attention runner gated the same rendezvous
+        # behind is_elastic_attention; the elastic lifecycle (connect() in
+        # afd_plugin/elastic/gpu.py) rebuilds the connector once roles are up.
+        if not is_elastic_attention(self.vllm_config):
+            if not self.connector.is_initialized:
+                self.connector.init_afd_connector()
+        # ### PATCH END: elastic attention defers the connector rendezvous.
 
     # Patch reason: native KV initialization excludes DP1 from UBatchRunner
     # construction, although AFD can coordinate its two microbatches locally.

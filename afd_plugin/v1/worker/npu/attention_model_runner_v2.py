@@ -42,6 +42,7 @@ from afd_plugin.connectors import (
     AFDConnectorFactory,
     AFDForwardContextMetadata,
 )
+from afd_plugin.elastic.config import is_elastic_attention
 from afd_plugin.model_executor.models.forward_context import use_afd_metadata_provider
 from afd_plugin.v1.worker.attention_metadata import (
     AFDMetadataProviderMixin,
@@ -310,8 +311,17 @@ class AFDNPUAttentionModelRunnerV2(AFDMetadataProviderMixin, NPUModelRunnerV2):
         **kwargs,
     ) -> None:
         super().load_model(load_dummy_weights, *args, **kwargs)
-        if not self.connector.is_initialized:
-            self.connector.init_afd_connector()
+        # ### PATCH START: elastic attention defers the connector rendezvous.
+        # Mechanism: the vLLM 0.30 launcher waits for the A engine to build
+        # synchronously, while init_afd_connector() collectively waits for F,
+        # which the client only pulls after this returns — boot deadlocks.
+        # v0.26 origin: the MRV1 attention runner gated the same rendezvous
+        # behind is_elastic_attention; the elastic lifecycle (connect() in
+        # afd_plugin/elastic/npu.py) rebuilds the connector once roles are up.
+        if not is_elastic_attention(self.vllm_config):
+            if not self.connector.is_initialized:
+                self.connector.init_afd_connector()
+        # ### PATCH END: elastic attention defers the connector rendezvous.
 
     # Native MRV2 imports its factory by value; scope that exact binding while
     # preserving Ascend's KV initialization (too large to copy). Eager DBO only.

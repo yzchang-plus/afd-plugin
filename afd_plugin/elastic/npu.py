@@ -171,7 +171,7 @@ class AFDElasticNPUExecutor(AFDElasticGPUExecutor):
         with skip_dp_coordination():
             super().warm_and_capture()
 
-    def switch_and_prepare(self) -> None:
+    def switch_and_prepare(self) -> tuple:
         # Lazy import avoids the attention runner -> worker/runtime import cycle.
         from afd_plugin.compat.npu import npu_afd_num_ubatches
         from afd_plugin.v1.worker.npu.attention_model_runner_v2 import (
@@ -188,7 +188,9 @@ class AFDElasticNPUExecutor(AFDElasticGPUExecutor):
         # Runner.shutdown resets the process workspace. Worker.init_device is
         # deliberately not rerun while EEP switches the existing device groups.
         init_workspace_manager(worker.device, npu_afd_num_ubatches(worker.vllm_config))
-        _replace_active_groups(**pop_standby_groups())
+        # Stock contract: return the retired groups so the caller can schedule
+        # their async destruction (commit_scale_up -> _start_group_cleanup).
+        retired_groups = _replace_active_groups(**pop_standby_groups())
         parallel = worker.parallel_config
         parallel.data_parallel_size = request.new_data_parallel_size
         if request.new_data_parallel_rank != ReconfigureRankType.KEEP_CURRENT_RANK:
@@ -210,6 +212,7 @@ class AFDElasticNPUExecutor(AFDElasticGPUExecutor):
             )
             worker.load_model(load_dummy_weights=False)
             worker.initialize_from_config(copy.deepcopy(worker.afd_kv_cache_config))
+        return retired_groups
 
 
 __all__ = [

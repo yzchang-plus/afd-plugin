@@ -180,7 +180,17 @@ def _use_camp2p_dp_padding(attention_size: int, ffn_size: int) -> Iterator[None]
             attention_tp = attention_size // dp_size
             # Rank a sends to FFN a % ffn_size. Contiguous Attention TP peers
             # must also pad equally; non-aligned TP blocks connect all groups.
-            num_groups = ffn_size // attention_tp if ffn_size % attention_tp == 0 else 1
+            # Re-anchor: after an elastic A resize the DP span may not divide
+            # into equal FFN-target groups (e.g. A3/F2 maps r -> r % 2 with
+            # unequal group sizes); fall back to one group = pad every rank
+            # to the global max, which stays stride-safe for CAMP2P.
+            num_groups = (
+                ffn_size // attention_tp
+                if attention_tp > 0
+                and ffn_size % attention_tp == 0
+                and dp_size % (ffn_size // attention_tp) == 0
+                else 1
+            )
             padded_counts = (
                 sync.num_tokens_across_dp.reshape(-1, num_groups)
                 .amax(dim=0)

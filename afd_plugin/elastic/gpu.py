@@ -178,6 +178,30 @@ class AFDElasticGPUExecutor(ElasticEPScalingExecutor):
             return
         super()._prepare_eplb_communicator(eplb_group)
 
+    # Re-anchor main@544f182d: stock commit_scale_up hardwires the expert
+    # mapping broadcast/receive plus EPLB setup/reshuffle around the switch.
+    # A engines hold no experts and run EPLB off — the new-engine side dies
+    # in receive_expert_mapping()/setup_eplb_from_mapping() (observed:
+    # A3's commit_scale_up(False) crashed inside the module-level
+    # broadcast_expert_mapping helper). Mirror the stock sequence minus the
+    # expert/EPLB steps; the paired no-op method overrides above document
+    # the same contract since the 0.30 port.
+    def commit_scale_up(self, is_existing_worker: bool) -> None:
+        from vllm.platforms import current_platform
+
+        retired_groups = None
+        if is_existing_worker:
+            retired_groups = self.switch_and_prepare()
+        if not self._can_reuse_fused_moe_kernel():
+            # warm_and_capture's dummy run warms the deferred dp/ep groups.
+            self.warm_and_capture()
+        elif current_platform.is_rocm():
+            from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+
+            self._warm_target_groups(get_dp_group(), get_ep_group())
+        if retired_groups:
+            self._start_group_cleanup(retired_groups)
+
     def perform_eplb_reshuffle(self) -> None:
         pass
 

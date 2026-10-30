@@ -132,6 +132,15 @@ class RemoteFFNProxy(nn.Module):
         afd_metadata = get_afd_metadata_from_forward_context()
         if afd_metadata is None:
             raise RuntimeError("RemoteFFNProxy requires AFD forward metadata")
+        if not afd_metadata.connector.is_initialized:
+            # Re-anchor main@544f182d: paused A engines keep running empty DP
+            # waves while the AFD link is down (between release_link and
+            # connect during elastic resize), and those dummy steps reach the
+            # model forward. Their outputs are discarded, so an identity FFN
+            # is the safe local completion. Real serving cannot land here:
+            # the client drains and pauses before release and only resumes
+            # after finish() has re-connected both roles.
+            return hidden_states
         forward_context = get_forward_context()
         stage_idx = int(
             getattr(forward_context, "ubatch_idx", afd_metadata.stage_idx),

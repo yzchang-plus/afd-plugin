@@ -55,6 +55,16 @@ class AFDNPUAttentionWorker(NPUWorker):
         self.afd_kv_cache_config: KVCacheConfig | None = None
         if self.afd_runtime_deferred:
             self.elastic_ep_executor = AFDElasticNPUExecutor(self)
+        else:
+            # Mirror the vllm GPU Worker mount: the elastic EP state machine
+            # RPCs elastic_ep_execute at every worker. Non-elastic runs never
+            # call it, but the attribute keeps the worker shape identical to
+            # the stock-NPUWorker mount the feat branch used to carry.
+            from vllm.distributed.elastic_ep.elastic_execute import (
+                ElasticEPScalingExecutor,
+            )
+
+            self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
     def init_device(self) -> None:
         assert_compatible_afd_stack(
@@ -122,6 +132,34 @@ class AFDNPUAttentionWorker(NPUWorker):
             return CompilationTimes(language_model=0.0, encoder=0.0)
         # ### PATCH END: EEP must not forward into stopped F workers.
         return super().compile_or_warm_up_model()
+
+    # Signature matches vllm-ascend NPUWorker.load_model call sites from the
+    # 0.32 generation on (the elastic standby lane passes load_dummy_weights).
+    # The stock body stays upstream; the flag is forwarded through an
+    # instance-level wrapper on the runner binding (house pattern: scope that
+    # exact binding), so there is no body copy to re-anchor on upstream drift.
+    def load_model(self, *, load_dummy_weights: bool = False, **kwargs: Any) -> None:
+        runner = self.model_runner
+        original = runner.load_model
+
+        def _forward(*args: Any, **kw: Any) -> None:
+            kw.setdefault("load_dummy_weights", load_dummy_weights)
+            original(*args, **kw)
+
+        runner.load_model = _forward  # type: ignore[method-assign]
+        try:
+            super().load_model(**kwargs)
+        finally:
+            del runner.load_model  # unshadow the class method
+
+    def elastic_ep_execute(self, execute_method: str, *args: Any, **kwargs: Any):
+        # Elastic EP state machine entry point: ElasticEPScalingState drives
+        # the worker through model_executor.collective_rpc(
+        # "elastic_ep_execute", ...) (vllm/distributed/elastic_ep/
+        # elastic_state.py). Mirrors vllm gpu_worker Worker.elastic_ep_execute;
+        # the executor is mounted in __init__ (AFD NPU executor when this
+        # attention role runs elastic, plain upstream executor otherwise).
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
     def afd_send_stop(self) -> None:
         send_stop(self)

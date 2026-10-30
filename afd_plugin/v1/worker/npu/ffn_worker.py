@@ -77,6 +77,15 @@ class AFDNPUFFNWorker(NPUWorker):
         self._ffn_shutdown_event: threading.Event | None = None
         self._ffn_loop_error: BaseException | None = None
         self._cpu_binding_attempted = False
+        # Same mount as the attention worker's non-deferred lane: vllm's
+        # elastic EP state machine dispatches elastic_ep_execute at every
+        # worker in the group (the GPU F worker inherits the mount from vllm
+        # Worker; stock NPUWorker has none, the feat branch used to add it).
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            ElasticEPScalingExecutor,
+        )
+
+        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
     def init_device(self) -> None:
         assert_compatible_afd_stack(
@@ -124,6 +133,31 @@ class AFDNPUFFNWorker(NPUWorker):
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         return CompilationTimes(language_model=0.0, encoder=0.0)
+
+    # Signature matches vllm-ascend NPUWorker.load_model call sites from the
+    # 0.32 generation on; the F runners accept load_dummy_weights since the
+    # keyword pass-through fix (accepted and deliberately unused — FFN
+    # weights are always real). Stock body stays upstream; see the attention
+    # worker's identical override for the forwarding mechanism.
+    def load_model(self, *, load_dummy_weights: bool = False, **kwargs: Any) -> None:
+        runner = self.model_runner
+        original = runner.load_model
+
+        def _forward(*args: Any, **kw: Any) -> None:
+            kw.setdefault("load_dummy_weights", load_dummy_weights)
+            original(*args, **kw)
+
+        runner.load_model = _forward  # type: ignore[method-assign]
+        try:
+            super().load_model(**kwargs)
+        finally:
+            del runner.load_model  # unshadow the class method
+
+    def elastic_ep_execute(self, execute_method: str, *args: Any, **kwargs: Any):
+        # Mirrors vllm gpu_worker Worker.elastic_ep_execute; the plain
+        # upstream executor is mounted in __init__ (F-side elastic actions
+        # arrive through the afd_* RPCs, not the EEP executor).
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
     def execute_model(
         self,

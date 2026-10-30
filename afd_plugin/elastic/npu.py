@@ -142,6 +142,21 @@ class AFDElasticNPUExecutor(AFDElasticGPUExecutor):
         # passes load_dummy_weights=False for the same effect).
         self.worker.load_model()
 
+    # Re-anchor main@544f182d: stock prepare_reconfiguration warms the
+    # standby dp/ep device groups with an all-rank all_reduce, but the
+    # joining engine never issues a matching collective (its
+    # warmup_new_worker skips warm_and_capture without fused-MoE kernel
+    # reuse, which AFD A engines never have), so with lazily-initialized
+    # HCCL comms the two existing ranks die with EI0015 rootInfo-detect
+    # timeout. vLLM already skips this warm on ROCm for the same
+    # asymmetry; NPU follows. Deferral is the only structural option:
+    # warming inside warmup_new_worker would deadlock instead, since the
+    # new engine's PREPARE state is gated on the existing prepare
+    # completing (sync_kv_cache_memory_size). The first post-switch
+    # serving collective initializes the comms with all ranks present.
+    def _warm_target_groups(self, dp_group, ep_group) -> None:
+        return
+
     def switch_and_prepare(self) -> None:
         # Lazy import avoids the attention runner -> worker/runtime import cycle.
         from afd_plugin.compat.npu import npu_afd_num_ubatches

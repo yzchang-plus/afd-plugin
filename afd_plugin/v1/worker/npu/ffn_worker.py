@@ -87,6 +87,17 @@ class AFDNPUFFNWorker(NPUWorker):
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
+    # Re-anchor main@544f182d: mirrors the attention worker's shim for the
+    # GPU-Worker property the elastic commit/warm paths read.
+    @property
+    def randomize_dummy_inputs(self) -> bool:
+        from vllm import envs
+
+        return bool(
+            getattr(envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
+            and self.vllm_config.parallel_config.data_parallel_size > 1
+        )
+
     def init_device(self) -> None:
         assert_compatible_afd_stack(
             self.vllm_config,

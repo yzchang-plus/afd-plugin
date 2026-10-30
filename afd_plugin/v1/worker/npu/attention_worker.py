@@ -66,6 +66,19 @@ class AFDNPUAttentionWorker(NPUWorker):
 
             self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
+    # Re-anchor main@544f182d: the elastic commit/warm paths read the GPU
+    # Worker's randomize_dummy_inputs property; ascend's NPUWorker base
+    # lacks it. Mirrors stock semantics; not cached because elastic EP
+    # rewrites parallel_config in place on reconfigure.
+    @property
+    def randomize_dummy_inputs(self) -> bool:
+        from vllm import envs
+
+        return bool(
+            getattr(envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
+            and self.vllm_config.parallel_config.data_parallel_size > 1
+        )
+
     def init_device(self) -> None:
         assert_compatible_afd_stack(
             self.vllm_config,

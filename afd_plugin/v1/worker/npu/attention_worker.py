@@ -7,6 +7,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from vllm.config import set_current_vllm_config
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -103,7 +104,15 @@ class AFDNPUAttentionWorker(NPUWorker):
         if is_elastic_attention(self.vllm_config):
             self.afd_kv_cache_config = deepcopy(kv_cache_config)
         # ### PATCH END: save config, never retain an old KV tensor allocation.
-        super().initialize_from_config(kv_cache_config)
+        # ### PATCH START: RPC-driven KV rebuilds lack the ambient vllm config.
+        # Boot-time EngineCore already runs under set_current_vllm_config, but
+        # the elastic path (afd_finish → finish_attention → this override, and
+        # resize alike) arrives via worker RPC with no current config, and the
+        # Ascend V2 KV allocator asserts on get_current_vllm_config(). Supply
+        # the worker's own config; nesting over the boot context is a no-op.
+        with set_current_vllm_config(self.vllm_config):
+            super().initialize_from_config(kv_cache_config)
+        # ### PATCH END: RPC-driven KV rebuilds lack the ambient vllm config.
 
     # Return the native contract during deferred EEP initialization; real warmup
     # follows after all target engines reach COMPLETE. Signature unchanged.

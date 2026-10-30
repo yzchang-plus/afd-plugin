@@ -9,6 +9,7 @@ import os
 import struct
 from typing import TYPE_CHECKING, Any, Final, Literal
 
+from afd_plugin.compat.vllm import pass_config_enable_sp
 from afd_plugin.config import (
     AFD_ASYNC_CONNECTOR,
     CAMP2P_CONNECTOR,
@@ -121,7 +122,7 @@ def validate_gpu_model_runner_v2_config(
         or (parallel.enable_elastic_ep and not is_elastic_attention(vllm_config))
         or parallel.enable_eplb
         or parallel.use_sequence_parallel_moe
-        or vllm_config.compilation_config.pass_config.enable_sp
+        or pass_config_enable_sp(vllm_config)
     ):
         raise RuntimeError("AFD ModelRunnerV2 requires static expert parallelism")
     if (

@@ -68,10 +68,24 @@ def is_target_vllm_compatible() -> bool:
     return version_text.startswith(TARGET_VLLM_VERSION)
 
 
+def pass_config_enable_sp(vllm_config) -> bool:
+    """Model-owned sequence-parallel flag from the compilation pass config.
+
+    Re-anchor: the vllm 0.30 generation exposed ``pass_config.enable_sp``;
+    newer main removed the field (effective SP derives solely from
+    ``ParallelConfig.use_sequence_parallel_moe``). A missing field reads as
+    False — the new-generation semantics at both AFD call sites.
+    """
+    return bool(
+        getattr(vllm_config.compilation_config.pass_config, "enable_sp", False)
+    )
+
+
 __all__ = [
     "TARGET_VLLM_VERSION",
     "assert_vllm_version_supported",
     "get_installed_vllm_version",
     "is_target_vllm_compatible",
     "is_vllm_version_supported",
+    "pass_config_enable_sp",
 ]

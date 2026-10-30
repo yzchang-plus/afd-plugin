@@ -157,6 +157,20 @@ class AFDElasticNPUExecutor(AFDElasticGPUExecutor):
     def _warm_target_groups(self, dp_group, ep_group) -> None:
         return
 
+    # Re-anchor main@544f182d: stock warm_and_capture only skips DP
+    # coordination when fused-MoE kernels are reusable; AFD A engines have
+    # no MoE, so the stock else-branch runs the warm dummy-run's DP sync —
+    # which needs the joining engine to dispatch in lockstep while that
+    # engine is blocked on this engine's commit broadcast (circular wait,
+    # both sides die on 300s store timeouts). The warm is purely local
+    # kernel/graph preparation: always skip DP coordination here. (Stock
+    # GPU EEP never exercises the else branch because EEP implies MoE.)
+    def warm_and_capture(self) -> None:
+        from vllm.v1.worker.dp_utils import skip_dp_coordination
+
+        with skip_dp_coordination():
+            super().warm_and_capture()
+
     def switch_and_prepare(self) -> None:
         # Lazy import avoids the attention runner -> worker/runtime import cycle.
         from afd_plugin.compat.npu import npu_afd_num_ubatches

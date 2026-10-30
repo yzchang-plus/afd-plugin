@@ -99,7 +99,10 @@ class AFDNPUFFNModelRunner:
     def parse_config(vllm_config: VllmConfig) -> AFDConfig:
         return parse_afd_config(vllm_config, expected_role="ffn")
 
-    def load_model(self) -> None:
+    # Signature: accepts NPUWorker.load_model's load_dummy_weights keyword
+    # pass-through (vllm-ascend 8d4409d62 made MRV2 the default path). FFN
+    # weights are always real; the flag is accepted and deliberately unused.
+    def load_model(self, *, load_dummy_weights: bool = False, **kwargs: Any) -> None:
         # Load inside the initialized worker. The native loader owns weight
         # materialization and quantization postprocessing; FFN does not need
         # Attention request, sampler, KV or compilation-runner state.

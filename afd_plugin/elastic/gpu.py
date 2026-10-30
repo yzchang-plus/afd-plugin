@@ -168,6 +168,16 @@ class AFDElasticGPUExecutor(ElasticEPScalingExecutor):
     def prepare_new_worker(self) -> None:
         pass
 
+    # Re-anchor main@544f182d: stock prepare_reconfiguration calls this
+    # unconditionally and asserts a non-None standby EPLB group, but
+    # create_standby_groups builds that group only under enable_eplb. AFD
+    # elastic runs EPLB off (experts live on the FFN side; A engines hold no
+    # expert weights), so None is the legitimate steady state here.
+    def _prepare_eplb_communicator(self, eplb_group) -> None:
+        if eplb_group is None:
+            return
+        super()._prepare_eplb_communicator(eplb_group)
+
     def perform_eplb_reshuffle(self) -> None:
         pass
 

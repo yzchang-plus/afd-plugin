@@ -162,7 +162,9 @@ class _DummyModel:
             expected = float(i + 1) * 100 + sender_rank
             got = self.state_dict()[name].data
             if not torch.allclose(got, torch.full_like(got, expected)):
-                raise RuntimeError(f"param {name}: got {got.flatten()[0].item()}, expected {expected}")
+                raise RuntimeError(
+                    f"param {name}: got {got.flatten()[0].item()}, expected {expected}"
+                )
 
 
 def _worker(rank: int, ports: dict, result_path: str) -> None:
@@ -170,7 +172,6 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
     import torch
     import torch.distributed as dist
     import torch_npu  # noqa: F401
-
     import vllm_ascend  # noqa: F401  (activates the platform hooks)
 
     # Production applies the ascend global patch chain from
@@ -247,12 +248,13 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
             decode_context_model_parallel_size=1,
             backend="hccl",
         )
-        assert get_world_group().rank == rank, f"world rank {get_world_group().rank} != {rank}"
+        assert get_world_group().rank == rank, (
+            f"world rank {get_world_group().rank} != {rank}"
+        )
         assert get_dp_group().world_size == dp_size
         assert get_dp_group().device_communicator is not None
-        assert get_dp_group().device_communicator.device == device, (
-            f"device communicator device {get_dp_group().device_communicator.device} != {device}"
-        )
+        comm_device = get_dp_group().device_communicator.device
+        assert comm_device == device, f"device communicator {comm_device} != {device}"
         stages["boot"] = "PASS"
         finish()
 
@@ -341,7 +343,9 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
         dist.all_reduce(t, group=get_dp_group().device_group)
         expected = 10.0  # 1 + 2 + 3 + 4
         if t[0].item() != expected:
-            raise RuntimeError(f"final all_reduce got {t[0].item()}, expected {expected}")
+            raise RuntimeError(
+                f"final all_reduce got {t[0].item()}, expected {expected}"
+            )
         b = torch.zeros(4, dtype=torch.float32, device=device)
         if rank == 0:
             b.fill_(7.0)
@@ -387,6 +391,7 @@ def test_eep_group_lifecycle_2_to_4() -> None:
         zip(
             ["store_a", "store_b", "local0", "local1", "local2", "local3"],
             _find_free_ports(6),
+            strict=True,
         )
     )
 
@@ -403,7 +408,10 @@ def test_eep_group_lifecycle_2_to_4() -> None:
         if os.path.exists(path):
             os.remove(path)
 
-    procs = [ctx.Process(target=_worker, args=(r, ports, paths[r])) for r in range(NEW_DP_SIZE)]
+    procs = [
+        ctx.Process(target=_worker, args=(r, ports, paths[r]))
+        for r in range(NEW_DP_SIZE)
+    ]
     for proc in procs:
         proc.start()
 
@@ -424,7 +432,9 @@ def test_eep_group_lifecycle_2_to_4() -> None:
                     data = json.load(f)
                 if any(v.startswith("FAIL") for v in data.values()):
                     any_fail = True
-                if "cleanup" not in data and not any(v.startswith("FAIL") for v in data.values()):
+                if "cleanup" not in data and not any(
+                    v.startswith("FAIL") for v in data.values()
+                ):
                     all_done = False  # still mid-run (or waiting on peers)
             except (OSError, json.JSONDecodeError):
                 all_done = False
@@ -444,7 +454,7 @@ def test_eep_group_lifecycle_2_to_4() -> None:
     del stores  # close the coord stores after the workers are done
 
     results: list[dict] = []
-    for r, path in enumerate(paths):
+    for path in paths:
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 results.append(json.load(f))
@@ -459,8 +469,12 @@ def test_eep_group_lifecycle_2_to_4() -> None:
             mark = results[r].get(stage, "MISSING")
             if not (mark == "PASS" or mark.startswith("WARN")):
                 failed = True
-            marks.append(mark if mark.startswith("PASS") or mark.startswith("WARN") else mark)
-        line = f"{stage:22s} " + " | ".join(m if len(m) <= 40 else m[:40] + "..." for m in marks)
+            marks.append(
+                mark if mark.startswith("PASS") or mark.startswith("WARN") else mark
+            )
+        line = f"{stage:22s} " + " | ".join(
+            m if len(m) <= 40 else m[:40] + "..." for m in marks
+        )
         print(line, flush=True)
         for r, m in enumerate(marks):
             if not (m == "PASS" or m.startswith("WARN")):

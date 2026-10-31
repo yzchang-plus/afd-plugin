@@ -76,9 +76,7 @@ def pass_config_enable_sp(vllm_config) -> bool:
     ``ParallelConfig.use_sequence_parallel_moe``). A missing field reads as
     False — the new-generation semantics at both AFD call sites.
     """
-    return bool(
-        getattr(vllm_config.compilation_config.pass_config, "enable_sp", False)
-    )
+    return bool(getattr(vllm_config.compilation_config.pass_config, "enable_sp", False))
 
 
 __all__ = [

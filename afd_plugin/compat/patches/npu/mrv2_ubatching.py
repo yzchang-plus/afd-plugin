@@ -181,6 +181,8 @@ def use_async_cam_dbo_dispatch() -> Iterator[None]:
         *extra_args,
         **extra_kwargs,
     ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
+        # Stock call sites pass the tail by keyword; extra_args stays empty
+        # in practice and exists only to absorb future positional additions.
         desc, sync = original_dispatch(
             cudagraph_manager,
             num_reqs,
@@ -188,13 +190,13 @@ def use_async_cam_dbo_dispatch() -> Iterator[None]:
             uniform_token_count,
             dp_size,
             dp_rank,
+            *extra_args,
             max_query_len=max_query_len,
             need_eager=need_eager,
             num_active_loras=num_active_loras,
             parallel_config=parallel_config,
             allow_ubatching=allow_ubatching,
             uniform_decode=uniform_decode,
-            *extra_args,
             **extra_kwargs,
         )
         # ### PATCH START: native DBO eligibility without a DP handshake.

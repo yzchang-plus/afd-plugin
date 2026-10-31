@@ -20,14 +20,13 @@ from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_scaling_elastic_ep,
     set_scaling_elastic_ep,
 )
+from vllm.logger import init_logger
 from vllm.v1.core.sched.scheduler import PauseState
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerManager
-
-from vllm.logger import init_logger
 
 from afd_plugin.elastic.client import ElasticAFDClient
 from afd_plugin.elastic.config import Role, is_elastic_attention
@@ -50,11 +49,7 @@ def afd_reset_after_warmup(self) -> None:
     pause_state = self.scheduler.pause_state
     engines_running = self.engines_running
     pending_pause = self.pending_pause
-    if (
-        pause_state != PauseState.PAUSED_ALL
-        or engines_running
-        or pending_pause
-    ):
+    if pause_state != PauseState.PAUSED_ALL or engines_running or pending_pause:
         logger.warning(
             "[AFD] afd_reset_after_warmup: dp_rank=%s unexpected state "
             "pause=%s engines_running=%s pending_pause=%s; skipping reset",

@@ -466,9 +466,11 @@ class AFDAttentionModelRunnerV2(AFDMetadataProviderMixin, GPUModelRunnerV2):
         # v0.26 origin: the MRV1 attention runner gated the same rendezvous
         # behind is_elastic_attention; the elastic lifecycle (connect() in
         # afd_plugin/elastic/gpu.py) rebuilds the connector once roles are up.
-        if not is_elastic_attention(self.vllm_config):
-            if not self.connector.is_initialized:
-                self.connector.init_afd_connector()
+        if (
+            not is_elastic_attention(self.vllm_config)
+            and not self.connector.is_initialized
+        ):
+            self.connector.init_afd_connector()
         # ### PATCH END: elastic attention defers the connector rendezvous.
 
     # Patch reason: native KV initialization excludes DP1 from UBatchRunner

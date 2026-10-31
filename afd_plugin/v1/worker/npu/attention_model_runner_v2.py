@@ -320,9 +320,11 @@ class AFDNPUAttentionModelRunnerV2(AFDMetadataProviderMixin, NPUModelRunnerV2):
         # v0.26 origin: the MRV1 attention runner gated the same rendezvous
         # behind is_elastic_attention; the elastic lifecycle (connect() in
         # afd_plugin/elastic/npu.py) rebuilds the connector once roles are up.
-        if not is_elastic_attention(self.vllm_config):
-            if not self.connector.is_initialized:
-                self.connector.init_afd_connector()
+        if (
+            not is_elastic_attention(self.vllm_config)
+            and not self.connector.is_initialized
+        ):
+            self.connector.init_afd_connector()
         # ### PATCH END: elastic attention defers the connector rendezvous.
 
     # Native MRV2 imports its factory by value; scope that exact binding while

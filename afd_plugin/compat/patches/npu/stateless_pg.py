@@ -503,9 +503,10 @@ def apply_afd_stateless_pg_patches() -> bool:
     BlockTable.clear = _block_table_clear
 
     # --- 7: V1 runner dummy-weight lane ---
-    if "load_dummy_weights" not in inspect.signature(
-        NPUModelRunnerV1.load_model
-    ).parameters:
+    if (
+        "load_dummy_weights"
+        not in inspect.signature(NPUModelRunnerV1.load_model).parameters
+    ):
         NPUModelRunnerV1.load_model = _wrap_v1_load_model(NPUModelRunnerV1.load_model)
 
     # --- 2b: socket range ahead of the first in-process HCCL comm ---

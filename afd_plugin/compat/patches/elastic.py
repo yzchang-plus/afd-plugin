@@ -27,8 +27,12 @@ from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerManager
 
+from vllm.logger import init_logger
+
 from afd_plugin.elastic.client import ElasticAFDClient
 from afd_plugin.elastic.config import Role, is_elastic_attention
+
+logger = init_logger(__name__)
 
 
 def afd_eep_complete(self) -> bool:
@@ -37,8 +41,29 @@ def afd_eep_complete(self) -> bool:
 
 
 def afd_reset_after_warmup(self) -> None:
-    assert self.scheduler.pause_state == PauseState.PAUSED_ALL
-    assert not self.engines_running and not self.pending_pause
+    # Re-anchor main@544f182d: post-commit pause/running state legitimately
+    # differs per engine (scale-up joiners boot unpaused; the wave sync can
+    # leave engines_running True on retained engines). The bare asserts died
+    # with an empty-message AssertionError and killed the whole resize; log
+    # the unexpected shape loudly and skip the (only cache-hygiene) reset
+    # instead, so a genuine state bug stays visible without aborting scale.
+    pause_state = self.scheduler.pause_state
+    engines_running = self.engines_running
+    pending_pause = self.pending_pause
+    if (
+        pause_state != PauseState.PAUSED_ALL
+        or engines_running
+        or pending_pause
+    ):
+        logger.warning(
+            "[AFD] afd_reset_after_warmup: dp_rank=%s unexpected state "
+            "pause=%s engines_running=%s pending_pause=%s; skipping reset",
+            self.vllm_config.parallel_config.data_parallel_rank,
+            pause_state,
+            engines_running,
+            pending_pause,
+        )
+        return
     self._reset_caches()
 
 

@@ -56,8 +56,23 @@ class ElasticTopology:
         # TP > 1 requires a separate static+EEP hardware qualification.
         if self.attention_tp != 1 or self.ffn_tp != 1:
             raise ValueError("This elastic AFD implementation currently requires TP=1")
-        if self.attention_dp * self.attention_tp < self.ffn_dp * self.ffn_tp:
+        attention_ranks = self.attention_dp * self.attention_tp
+        ffn_ranks = self.ffn_dp * self.ffn_tp
+        if attention_ranks < ffn_ranks:
             raise ValueError("AFD requires attention ranks >= FFN ranks")
+        # The CAMP2P data plane wires a fixed N:1 fanout: each FFN rank owns
+        # attention_ranks // ffn_ranks shared-memory windows (connector.ratio)
+        # and expects that many uniform row counts per step
+        # (_num_tokens_for_ffn_rank). A non-divisible mapping (e.g. 3A x 2F)
+        # leaves sources unwindowed and hangs the a2e kernels with an AI-core
+        # vector timeout, so reject it at the API boundary instead.
+        if attention_ranks % ffn_ranks:
+            raise ValueError(
+                "AFD elastic requires attention ranks divisible by FFN ranks "
+                f"for the CAMP2P N:1 fanout (got {attention_ranks}A x "
+                f"{ffn_ranks}F); scale attention to a multiple of the FFN "
+                "rank count"
+            )
 
     def resize(self, role: Role, size: int) -> ElasticTopology:
         if role not in ("attention", "ffn"):

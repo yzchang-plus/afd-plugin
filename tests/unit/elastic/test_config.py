@@ -20,8 +20,12 @@ def test_default_and_independent_role_sizes(config):
     assert topology == ElasticTopology(2, 1)
     assert topology.resize("attention", 4) == ElasticTopology(4, 1)
     assert topology.resize("ffn", 2) == ElasticTopology(2, 2)
-    # GPU's existing non-divisible topology is retained.
-    assert ElasticTopology(3, 1).resize("ffn", 2) == ElasticTopology(3, 2)
+    # Non-divisible fanout (3A x 2F) is rejected: the CAMP2P transport wires
+    # fixed N:1 windows (ratio = attn // ffn) and _num_tokens_for_ffn_rank
+    # expects uniform row counts per source; a dangling source hangs the a2e
+    # kernels (verified on device: AI-core vector timeout).
+    with pytest.raises(ValueError, match="divisible"):
+        ElasticTopology(3, 1).resize("ffn", 2)
 
 
 @pytest.mark.parametrize("mode", ["NONE", "VLLM_COMPILE"])

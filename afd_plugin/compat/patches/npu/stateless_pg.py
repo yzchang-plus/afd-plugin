@@ -404,7 +404,7 @@ def apply_afd_stateless_pg_patches() -> bool:
 
     Returns True when all patches are in place. Raises RuntimeError when
     the vLLM / vLLM-Ascend seams this port was anchored to have drifted
-    (fail fast beats mis-routed collectives at elastic-scaling time).
+    (fail fast beats wrongly routed collectives at elastic-scaling time).
     """
     from vllm_ascend.platform import NPUPlatform
 

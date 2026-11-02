@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
 # This file is a part of the vllm-ascend project.
 """N1 qualification: EEP standby-group lifecycle on Ascend NPU (2 -> 4).
 

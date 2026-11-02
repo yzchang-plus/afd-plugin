@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
-"""Actor factory seams, copied from vLLM 0.30.0 (ced6857afa0e), no new A manager."""
+"""Actor factory seams, copied from vLLM 0.30.0 (ced6857afa0e) and verified
+line-for-line against main@544f182d9; no new A manager."""
 
 from __future__ import annotations
 

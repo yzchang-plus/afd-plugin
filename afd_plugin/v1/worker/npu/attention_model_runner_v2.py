@@ -410,8 +410,10 @@ class AFDNPUAttentionModelRunnerV2(AFDMetadataProviderMixin, NPUModelRunnerV2):
     # AFD must install its sidecar at that exact context-construction seam.
     # Patch functionality: delegate all request/input/Attention/KV/sampling/
     # output work to native V2 while temporarily installing AFD metadata.
-    # Signature: matches vLLM v0.30.0 GPUModelRunner.execute_model, including
-    # the dummy-state parameters forwarded through Ascend NPUModelRunnerV2.
+    # Signature: ported from vLLM v0.30.0 GPUModelRunner.execute_model and
+    # re-anchored to main@544f182d9 (randomize_inputs plus a **kwargs
+    # pass-through for further upstream additions); Ascend PR#20321's
+    # NPUModelRunnerV2 mirrors the same signature.
     # Upstream source: vllm/v1/worker/gpu/model_runner.py,
     # GPUModelRunner.execute_model; commit
     # ced6857afa0ea7b2e3f0846a62e1394e90f15607.

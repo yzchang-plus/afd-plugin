@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
 """Scoped Ascend seams for vLLM ced6857a's native UBatchRunner.
 
-Ascend baseline: 8d4409d6256d8a6729140ddcc0d1889e3f96cdd6.
+Ascend baseline: 8d4409d6256d8a6729140ddcc0d1889e3f96cdd6. The dispatch
+wrapper is re-anchored to main@544f182d9 (signature-agnostic tail); the
+remaining DBO-path seams keep their ced6857a pins pending re-validation.
 MRV2 owns preparation, threads, handoff and graph lifecycle.
 All bindings are scoped to AFD runners and restored on exit.
 Remove when upstream supports Ascend child inputs, streams and cancellation.

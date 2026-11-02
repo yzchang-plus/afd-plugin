@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import copy
 import gc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch_npu  # noqa: F401
@@ -38,13 +38,19 @@ from afd_plugin.elastic.gpu import (
 )
 
 if TYPE_CHECKING:
+    from afd_plugin.v1.worker.npu.attention_model_runner_v2 import (
+        AFDNPUAttentionModelRunnerV2,
+    )
     from afd_plugin.v1.worker.npu.attention_worker import AFDNPUAttentionWorker
+    from afd_plugin.v1.worker.npu.ffn_model_runner import AFDNPUFFNModelRunner
     from afd_plugin.v1.worker.npu.ffn_worker import AFDNPUFFNWorker
 
 
 def send_stop(worker: AFDNPUAttentionWorker) -> None:
     """Only the connector's designated senders emit STOP on the old topology."""
-    worker.model_runner.connector.control_plane.send_dp_metadata_list(
+    control_plane = worker.model_runner.connector.control_plane
+    assert control_plane is not None, "STOP requires a live control plane"
+    control_plane.send_dp_metadata_list(
         AFDControlPayload({}, is_graph_capturing=False, is_warmup=False, stop=True)
     )
     torch.npu.synchronize(worker.device)
@@ -81,7 +87,9 @@ def _retire_attention_graphs(worker: AFDNPUAttentionWorker) -> None:
 
 
 def _retire_ffn_graphs(worker: AFDNPUFFNWorker) -> None:
-    runner = worker.model_runner
+    # ACL-graph retirement is the sync FFN runner's protocol; the async
+    # runner retires its own graphs elsewhere (runtime behavior unchanged).
+    runner = cast("AFDNPUFFNModelRunner", worker.model_runner)
     for entry in runner._acl_graphs.values():
         entry["graph"].reset()
     runner._acl_graphs.clear()
@@ -97,7 +105,8 @@ def release_link(worker: AFDNPUAttentionWorker | AFDNPUFFNWorker) -> None:
     gc.unfreeze()
     if worker.afd_expected_role == "attention":
         worker.afd_runtime_deferred = True
-        runner._afd_pending_metadata = None
+        attn_runner = cast("AFDNPUAttentionModelRunnerV2", runner)
+        attn_runner._afd_pending_metadata = None
         _retire_attention_graphs(worker)
     else:
         _retire_ffn_graphs(worker)

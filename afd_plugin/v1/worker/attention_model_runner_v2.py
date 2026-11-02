@@ -568,9 +568,9 @@ class AFDAttentionModelRunnerV2(AFDMetadataProviderMixin, GPUModelRunnerV2):
     # AFD must install its sidecar at that exact context-construction seam.
     # Patch functionality: delegate all request/input/Attention/KV/sampling/
     # output work to native V2 while temporarily installing AFD metadata.
-    # Signature: matches vLLM v0.30.0 GPUModelRunnerV2.execute_model exactly,
-    # including the 0.30.0 trailing context_len and valid_dummy_state_slots
-    # parameters, which are forwarded by keyword.
+    # Signature: ported from vLLM v0.30.0 GPUModelRunnerV2.execute_model and
+    # re-anchored to main@544f182d9 (randomize_inputs plus a **kwargs
+    # pass-through for further upstream additions).
     # Upstream source: vllm/v1/worker/gpu/model_runner.py,
     # GPUModelRunner.execute_model; commit
     # ced6857afa0ea7b2e3f0846a62e1394e90f15607.

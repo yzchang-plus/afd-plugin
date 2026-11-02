@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the AFD plugin project
-"""Narrow EEP integration seams, pinned to vLLM 0.30.0 (ced6857afa0e).
+"""Narrow EEP integration seams, ported from vLLM 0.30.0 (ced6857afa0e)
+and re-anchored to main@544f182d9 where marked inline.
 
 No ElasticEPScalingState code is patched. Worker role actions are implemented
 by AFDElasticGPUExecutor; role-aware orchestration drives the native

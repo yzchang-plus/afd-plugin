@@ -217,7 +217,7 @@ class AFDElasticGPUExecutor(ElasticEPScalingExecutor):
         self.worker.model_runner.shutdown()
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
-    def switch_and_prepare(self) -> None:
+    def switch_and_prepare(self) -> tuple:
         # Lazy import avoids the attention runner -> worker/runtime import cycle.
         from afd_plugin.v1.worker.attention_model_runner import AFDAttentionModelRunner
 
@@ -233,7 +233,9 @@ class AFDElasticGPUExecutor(ElasticEPScalingExecutor):
         init_workspace_manager(
             worker.device, num_ubatches=2 if worker.parallel_config.enable_dbo else 1
         )
-        _replace_active_groups(**pop_standby_groups())
+        # Stock contract: return the retired groups so the caller can
+        # schedule their async destruction.
+        retired_groups = _replace_active_groups(**pop_standby_groups())
         parallel = worker.parallel_config
         parallel.data_parallel_size = request.new_data_parallel_size
         if request.new_data_parallel_rank != ReconfigureRankType.KEEP_CURRENT_RANK:
@@ -255,3 +257,4 @@ class AFDElasticGPUExecutor(ElasticEPScalingExecutor):
             )
             worker.load_model(load_dummy_weights=False)
             worker.initialize_from_config(copy.deepcopy(worker.afd_kv_cache_config))
+        return retired_groups

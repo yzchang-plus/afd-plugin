@@ -309,6 +309,60 @@ def test_send_attn_output_selects_the_operator_ids_mode(monkeypatch):
     assert without_ids[-1] is None
 
 
+def test_send_attn_output_pads_routing_to_the_uniform_row_count(monkeypatch):
+    """Under N:1 fanout the routing must cover the padded rows, not the real ones.
+
+    The connector publishes one uniform row count per step and the a2e kernel
+    indexes the ids channel by that declared ``batch_size``. Routing left at the
+    rank's real token count is therefore read past its end, which is the
+    silent-wrong-results case, not a rejected request.
+    """
+
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "afd_camp2p_send_attn_output",
+        lambda *args: calls.append(args),
+        raising=False,
+    )
+    forward_context = SimpleNamespace()
+    monkeypatch.setattr(camp2p_module, "get_forward_context", lambda: forward_context)
+
+    # 4 Attention ranks feeding 2 FFN ranks; this rank carries 2 of 7 rows.
+    connector = _connector(role="attention", rank=0)
+    connector.dp_metadata_list = {0: _FakeDPMetadata([2, 3, 5, 7])}
+    hidden_states = torch.zeros(2, connector.hidden_size)
+    context = AFDTransferContext(
+        metadata=AFDTransferMetadata.create_attention_metadata(
+            layer_idx=0,
+            stage_idx=0,
+            seq_len=2,
+        ),
+    )
+    topk_ids = torch.tensor([[1, 3], [2, 0]], dtype=torch.int32)
+    topk_weights = torch.tensor([[0.6, 0.4], [0.5, 0.5]], dtype=torch.float32)
+
+    connector.send_attn_output(
+        hidden_states,
+        context,
+        routing=(topk_ids, topk_weights),
+    )
+
+    (recorded,) = calls
+    sent_ids, sent_scales = recorded[-2], recorded[-1]
+    uniform = 7
+    assert forward_context.cam_afdtransfer_state.batch_size == uniform
+    assert recorded[0].shape[0] == uniform
+    assert tuple(sent_ids.shape) == (uniform, connector.num_experts_per_tok)
+    assert tuple(sent_scales.shape) == (uniform, connector.num_experts_per_tok)
+    assert sent_ids[:2].tolist() == topk_ids.tolist()
+    assert sent_scales[:2].tolist() == topk_weights.tolist()
+    # Padding rows must route nothing: expert 0 with weight 0.
+    assert torch.count_nonzero(sent_ids[2:]) == 0
+    assert torch.count_nonzero(sent_scales[2:]) == 0
+    assert recorded[-3] == 1  # compute_gate stays on for a routing send
+
+
 def test_recv_attn_output_mode_and_ids_follow_the_receiver_declaration(
     monkeypatch,
 ):  # long-test: paired IDs/no-IDs receive ABI and returned tensor values
@@ -337,7 +391,9 @@ def test_recv_attn_output_mode_and_ids_follow_the_receiver_declaration(
     monkeypatch.setattr(torch.ops.afd_ascend, "a2e", fake_a2e, raising=False)
     monkeypatch.setattr(camp2p_module, "torch", _CpuTorch())
     connector = _connector(role="ffn", rank=1)
-    # FFN rank 1 owns Attention ranks 1 and 3: 3 + 7 tokens.
+    # FFN rank 1 pairs with Attention ranks 1 and 3. The CAMP2p sender pads
+    # every rank to the group max (7), so the receiver declares 7 + 7 rows
+    # (uniform-row contract; MC2 masks and graph keys size to this count).
     connector.dp_metadata_list = {0: _FakeDPMetadata([2, 3, 5, 7])}
 
     with_ids = connector.recv_attn_output(
@@ -364,6 +420,10 @@ def test_recv_attn_output_mode_and_ids_follow_the_receiver_declaration(
         70,
         80,
         90,
+        100,
+        110,
+        120,
+        130,
     ]
     assert calls[1][-1] == 0
     assert without_ids.input_ids is None
@@ -533,12 +593,17 @@ def test_recv_attn_output_reads_the_routing_slot(monkeypatch):
         recv_routing=True,
     )
 
-    # 10 tokens reach this FFN rank, in the same column order the gate produced.
+    # N:1 fanout publishes one uniform row count per Attention rank, so this FFN
+    # rank receives attention_size / ffn_size sources x the largest count, 2 * 7
+    # = 14 rows -- not the 3 + 7 = 10 its own group actually ran. The routing
+    # channel is indexed by that declared count, exactly like the activation:
+    # expecting 10 here is the row-misplacement hazard, because the kernel writes
+    # a fixed share per source and a smaller count reads past the supplied rows.
     assert calls[0][-1] == 1
     assert payload.input_ids is None
-    assert payload.topk_ids.shape == (10, connector.num_experts_per_tok)
+    assert payload.topk_ids.shape == (14, connector.num_experts_per_tok)
     assert payload.topk_ids[0].tolist() == list(range(connector.num_experts_per_tok))
-    assert payload.topk_weights.shape == (10, connector.num_experts_per_tok)
+    assert payload.topk_weights.shape == (14, connector.num_experts_per_tok)
     assert payload.topk_weights[0].tolist() == [0.5] * connector.num_experts_per_tok
 
 

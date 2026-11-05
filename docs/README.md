@@ -6,6 +6,9 @@
 2. Check [supported configurations and validation limits](support.md).
 3. Choose a [deployment recipe](../recipe/README.md) and configure the
    [Attention/FFN roles](configuration.md).
+4. Resize the pools at runtime with
+   [elastic AFD scaling](ELASTIC_AFD.md); Ascend NPU behavior and the launch
+   recipe are in [Elastic AFD on NPU](npu/ELASTIC_AFD_NPU.md).
 
 | Backend | Connector guides |
 | --- | --- |

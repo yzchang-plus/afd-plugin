@@ -125,22 +125,22 @@ def validate_elastic_config(config: VllmConfig) -> ElasticTopology:
         )
     if not config.model_config.enforce_eager:
         if afd.connector == "CAMP2pAFDConnector":
-            # Ascend only, for a reason a user can act on. The N:1 fanout
-            # publishes one uniform row count per step taken from the runtime
-            # DP metadata tensor (connector.py:_dp_token_counts), which a
-            # captured graph cannot bound: on 910B an NPU resize in graph mode
-            # died in re-capture with "Pending unbacked symbols" / "Could not
-            # guard on data-dependent expression". That failing step is also the
-            # one that restores the Attention runtime, so the rollback cannot
-            # complete and the deployment stops answering until it is restarted.
-            # Refusing at startup turns a dead service into an error message.
-            # GPU keeps graph support: there the published count is not
-            # data-dependent, so capture can bound it.
+            # Ascend only. The uniform row count fix (eager resolution in
+            # update_state_from_dp_metadata) makes the traced forward
+            # bounded, and boot-time graph capture works. But the ACL graph
+            # lifecycle during resize is blocked at the device level: clearing
+            # Python-side wrapper references does not release CANN device
+            # resources (graph handles, memory pools, stream bindings), so
+            # the first AclrtSynchronizeDevice after retirement fails with
+            # "MTE accesses an invalid GM address" (error 507011). Until
+            # vllm-ascend provides a safe in-process ACL graph retirement
+            # API, this combination is refused at startup.
             raise ValueError(
                 "Elastic AFD on Ascend NPU (CAMP2pAFDConnector) supports only "
-                "--enforce-eager: graph capture cannot bound the per-step "
-                "uniform row count the CAMP2P N:1 fanout publishes, so an NPU "
-                "resize in graph mode fails and leaves the service unusable"
+                "--enforce-eager: retiring ACL graphs mid-resize leaves "
+                "orphaned device resources (CANN error 507011) that crash "
+                "the next device synchronize. Requires an ACL graph "
+                "lifecycle API in vllm-ascend to lift."
             )
         validate_cuda_graph_mode(config, role="attention")
         # Upstream GPUModelRunner.load_model may return before installing its

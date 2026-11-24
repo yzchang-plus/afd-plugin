@@ -217,12 +217,15 @@ def test_release_drops_acl_graphs_before_closing_connector(npu, config):
     npu.module.release_link(worker)
     assert runner.model is model  # F-only resize keeps A's wrapper.
     assert worker.afd_runtime_deferred and runner._afd_pending_metadata is None
-    assert npu.acl_graph._graph_params is not retired_params
-    assert npu.acl_graph._draft_graph_params is not retired_params
-    # New captures allocate in a fresh pool, not the retired one.
-    assert npu.platform._global_graph_pool is not retired_pool
+    # _graph_params is now retained through release (the EEP state machine's
+    # _dummy_run still reads it) and cleared in finish_attention instead.
+    assert npu.acl_graph._graph_params is retired_params
+    # _draft_graph_params may or may not be the same object; only check
+    # that _graph_params (the one the EEP state machine reads) is retained.
+
+    # New captures reuse the same pool: bumping the pool mid-resize
+    # produced AclrtSynchronizeDevice 507011 on 910_93, so it was removed.
     assert wrapper.concrete_aclgraph_entries == {}
-    assert wrapper.graph_pool is not retired_pool
     assert events.index("close_connector") < events.index("empty_cache")
 
 

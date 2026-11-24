@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 import torch_npu  # noqa: F401
-from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import set_current_vllm_config
 from vllm.distributed.elastic_ep.standby_state import pop_standby_groups
 from vllm.distributed.parallel_state import _replace_active_groups
@@ -79,11 +78,20 @@ def _retire_attention_graphs(worker: AFDNPUAttentionWorker) -> None:
     # FIA graph workspaces belong to the retired capture generation;
     # initialize_from_config re-populates them via set_graph_params before
     # the next capture (NPUModelRunner._check_and_update_cudagraph_mode).
-    acl_graph._graph_params = None
-    acl_graph._draft_graph_params = None
-    with set_current_vllm_config(worker.vllm_config):
-        reset_compile_wrapper(runner.get_model())
-    _bump_acl_graph_pool()
+    # NOTE: _graph_params is deliberately NOT cleared here. The EEP state
+    # machine runs _dummy_run forward passes between release_link and the
+    # warmup re-capture, and those passes go through the graph replay path
+    # which reads _graph_params. Clearing it here crashes the state machine.
+    # The graphs are invalidated by clearing the wrapper entries above; the
+    # parameter object itself stays alive until finish_attention clears it
+    # right before set_graph_params creates the replacement.
+    # reset_compile_wrapper and _bump_acl_graph_pool are deliberately NOT
+    # called: both destroy device-level state (the compiled wrapper's
+    # internal buffers and the ACL graph pool handle) that the CANN runtime
+    # may still reference. Calling them mid-resize produced
+    # AclrtSynchronizeDevice error 507011 ("invalid handle") on 910_93.
+    # The wrapper entry clear above is sufficient: the graphs are
+    # unreachable, and the next capture creates fresh entries.
 
 
 def _retire_ffn_graphs(worker: AFDNPUFFNWorker) -> None:
@@ -105,6 +113,11 @@ def release_link(worker: AFDNPUAttentionWorker | AFDNPUFFNWorker) -> None:
     gc.unfreeze()
     if worker.afd_expected_role == "attention":
         worker.afd_runtime_deferred = True
+        # Tell this engine's busy loop to stop running engine steps: the
+        # connector is about to be destroyed and the ACL graphs retired, so
+        # any step that lands in this window (especially the idle dummy
+        # batch) would replay retired graphs and crash.
+        worker.afd_links_released = True
         attn_runner = cast("AFDNPUAttentionModelRunnerV2", runner)
         attn_runner._afd_pending_metadata = None
         _retire_attention_graphs(worker)
@@ -147,6 +160,26 @@ def finish_attention(worker: AFDNPUAttentionWorker) -> None:
     gc.collect()
     unlock_workspace()
     worker.afd_runtime_deferred = False
+    # Clear the retired graph parameters just before the warmup re-capture:
+    # set_graph_params refuses to run while _graph_params is non-None, and
+    # the warmup profile_run below is what triggers the new capture. This
+    # is the last safe moment -- after this, no _dummy_run will touch the
+    # old parameters.
+    acl_graph._graph_params = None
+    acl_graph._draft_graph_params = None
+    # Retained engines skip initialize_from_config, which is the only caller
+    # of set_graph_params via _check_and_update_cudagraph_mode. Without this,
+    # the warmup forward reads a None _graph_params and crashes. Create the
+    # replacement explicitly here, with the same capture sizes the runner
+    # would derive.
+    _vllm_cfg = getattr(worker, "vllm_config", None)
+    _comp_cfg = getattr(_vllm_cfg, "compilation_config", None) if _vllm_cfg else None
+    capture_sizes = list(getattr(_comp_cfg, "cudagraph_capture_sizes", None) or [])
+    if capture_sizes and acl_graph._graph_params is None:
+        acl_graph.set_graph_params(capture_sizes)
+    # The connector has been rebuilt and warmup has re-captured graphs;
+    # engine steps may resume.
+    worker.afd_links_released = False
     with set_current_vllm_config(worker.vllm_config):
         runner.profile_run()
         worker.compile_or_warm_up_model()

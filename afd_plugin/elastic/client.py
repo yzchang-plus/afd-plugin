@@ -51,6 +51,9 @@ class ElasticAFDClient:
         # spans preflight through switch completion without touching inference
         # admission, so the reservation wait never 503s serving traffic.
         self.resize_lock = asyncio.Lock()
+        # Set when a resize failed mid-switch and recovery was attempted; the
+        # seam checks this to decide between "try recover" and "degrade".
+        self.recovery_attempted = False
 
     async def initialize(self) -> None:
         await self.ffn.resize_actors(self.topology.ffn_dp)
@@ -264,3 +267,43 @@ class ElasticAFDClient:
         await self.client.collective_rpc_async("afd_finish")
         await self.client.call_utility_async("afd_reset_after_warmup")
         await self.client.resume_scheduler_async()
+
+    async def recover(self) -> bool:
+        """Attempt to restore the previous topology after a failed resize.
+
+        Called by the scaling seam when a switch fails mid-flight. The upstream
+        abort (vLLM PR #69224) has already cleared the engine-side elastic-EP
+        state before the exception reached us, so what remains is plugin-owned:
+        rebuild the FFN pool to the old size, republish the old topology,
+        reconnect, and resume. Returns True when the deployment is serving
+        again; False means the caller should degrade (fail closed).
+        """
+        from vllm.logger import init_logger
+
+        logger = init_logger(__name__)
+
+        self.recovery_attempted = True
+        old = self.topology
+        try:
+            # The F pool may have been partially rebuilt towards the target;
+            # bring it back to the old size.
+            await self.ffn.reserve(old.ffn_dp, PLACEMENT_RESERVE_TIMEOUT_S)
+            await self.ffn.spawn(old.ffn_dp)
+            # Republish the old topology so A engines reconnect to the right
+            # ranks (abort already returned them to the pre-prepare state).
+            ffn, role_port = await self._apply_topology(old)
+            await self.ffn.initialize_roles(old, ffn, role_port)
+            # Reconnect and warm up; this is the same finish() a successful
+            # resize runs, so graph capture and KV rebinding happen the same
+            # way they did at boot.
+            await self.finish()
+            self.degraded = None
+            return True
+        except Exception as exc:
+            logger.warning(
+                "AFD elastic recovery to %r failed (%s: %s); degrading",
+                old,
+                type(exc).__name__,
+                exc,
+            )
+            return False

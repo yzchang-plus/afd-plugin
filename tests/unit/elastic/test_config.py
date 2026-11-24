@@ -124,10 +124,11 @@ def test_npu_connector_now_qualified(config):
 
 
 def test_npu_graph_mode_rejected_at_startup(config):
-    # Same class as the ubatching and async-transport guards: refuse the
-    # combination instead of shipping a deployment that dies the first time
-    # someone resizes. Observed on Ascend 910B under FULL_DECODE_ONLY: the F
-    # resize returned 500 from dynamo and the service never answered again.
+    # The eager-only refusal is restored. The traced-forward fix (uniform row
+    # count resolved in eager) does make boot-time capture bounded, but the
+    # ACL graph lifecycle during resize fails at the device level: clearing
+    # Python references leaves orphaned CANN resources that crash the next
+    # AclrtSynchronizeDevice (error 507011). Lift requires a vllm-ascend API.
     config.additional_config["afd"]["connector"] = "CAMP2pAFDConnector"
     config.parallel_config.worker_cls = "afd_plugin.v1.worker.npu.AFDNPUAttentionWorker"
     config.model_config.enforce_eager = False

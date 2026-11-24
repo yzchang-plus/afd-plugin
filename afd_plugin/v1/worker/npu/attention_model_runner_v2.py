@@ -124,7 +124,22 @@ def _use_afd_fullgraph_replay_hook(
                 runner.build_capture_dp_metadata(padded_tokens),
                 None,
             )
-            result = original_run_fullgraph(desc)
+            try:
+                result = original_run_fullgraph(desc)
+            except AttributeError as exc:
+                # Elastic resize retires ACL graph state (release_link ->
+                # _retire_attention_graphs -> _graph_params = None) before
+                # this engine's graph manager knows about it. A replay step
+                # that lands in that window touches the retired GraphParams.
+                # Re-raise as a signal the engine can handle: the runner
+                # falls back to eager for this step.
+                from vllm_ascend.compilation import acl_graph as _ag
+
+                if _ag._graph_params is None and "attn_params" in str(exc):
+                    raise RuntimeError(
+                        "ACL graph state retired by elastic resize; replay skipped"
+                    ) from exc
+                raise
         finally:
             runner._afd_is_graph_replaying = previous_is_graph_replaying
         # ### PATCH END: publish one AFD pre-replay payload.

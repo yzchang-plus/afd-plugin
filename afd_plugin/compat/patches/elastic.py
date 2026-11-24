@@ -226,22 +226,34 @@ def install() -> None:
                         with contextlib.suppress(Exception):
                             controller.release_reservations()
                 else:
-                    # No exception object here means the task was cancelled (an
-                    # API client that hung up mid-switch); the topology is still
-                    # half applied, which is the same unrecoverable state.
+                    # The switch was entered but did not complete. Upstream
+                    # abort (vLLM #69224) has already cleared the engine-side
+                    # elastic-EP state before the exception reached us, so
+                    # recovery is now possible: rebuild the old topology and
+                    # resume serving. If recovery also fails, degrade.
                     reason = (
                         f"{type(failure).__name__}: {failure}"
                         if failure is not None
                         else "interrupted before completion"
                     )
-                    controller.degraded = reason
-                    logger.error(
-                        "AFD elastic resize failed after the switch began (%s). "
-                        "Admission stays closed (503) because a half-applied "
-                        "topology cannot be restored from the plugin: restart the "
-                        "deployment.",
-                        reason,
-                    )
+                    try:
+                        recovered = await controller.recover()
+                    except Exception:
+                        recovered = False
+                    if recovered:
+                        set_scaling_elastic_ep(False)
+                        logger.warning(
+                            "AFD elastic resize failed (%s) but the previous "
+                            "topology was restored; service resumed.",
+                            reason,
+                        )
+                    else:
+                        controller.degraded = reason
+                        logger.error(
+                            "AFD elastic resize failed (%s) and recovery also "
+                            "failed; admission stays closed (503) until restart.",
+                            reason,
+                        )
         finally:
             controller.resize_lock.release()
         # ### PATCH END: AFD role-aware drain and scale gate.

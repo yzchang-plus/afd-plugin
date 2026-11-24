@@ -6,6 +6,7 @@
 import asyncio
 import importlib.util
 import logging
+import pathlib
 import sys
 import types
 from enum import Enum
@@ -340,6 +341,79 @@ def test_switch_failure_does_not_release_reservations(seams):
 
     assert seams.get_scaling(), "should be degraded"
     assert not released, "degraded exit must not release reservations"
+
+
+def test_switch_failure_recovers_the_old_topology(seams):
+    """A mid-switch failure should try recovery before degrading.
+
+    Upstream abort (vLLM #69224) clears the engine-side state, so the plugin
+    can rebuild the old topology and resume. Mutating: make recover() return
+    False and the deployment degrades instead (the fallback is still safe).
+    """
+    controller = seams.llm.engine_core._afd_elastic
+    recover_calls = []
+
+    async def recover():
+        recover_calls.append(True)
+        return True  # recovery succeeds
+
+    controller.recover = recover
+
+    async def broken_resize(size, role):
+        raise RuntimeError("new DP group never became ready")
+
+    controller.resize = broken_resize
+    with pytest.raises(RuntimeError, match="never became ready"):
+        asyncio.run(seams.llm.scale_elastic_ep(4))
+
+    assert recover_calls, "the seam must attempt recovery before degrading"
+    # Service resumed: gate is down, no degraded marker.
+    assert not seams.get_scaling(), "recovery should reopen admission"
+    assert getattr(controller, "degraded", None) is None
+
+
+def test_switch_failure_degrades_when_recovery_also_fails(seams):
+    """If recovery fails too, the deployment degrades (fail-closed fallback)."""
+    controller = seams.llm.engine_core._afd_elastic
+
+    async def recover():
+        return False  # recovery also fails
+
+    controller.recover = recover
+
+    async def broken_resize(size, role):
+        raise RuntimeError("new DP group never became ready")
+
+    controller.resize = broken_resize
+    with pytest.raises(RuntimeError, match="never became ready"):
+        asyncio.run(seams.llm.scale_elastic_ep(4))
+
+    assert seams.get_scaling(), "degraded: admission stays closed"
+    assert controller.degraded is not None
+
+
+def test_graph_param_update_guard_on_retired_state(seams):
+    """A retired ACL graph state must not crash the EEP progress loop.
+
+    The elastic resize retires graphs (release_link -> _graph_params = None)
+    before the EEP state machine has finished reconfiguring. The machine then
+    calls update_full_graph_params which touches GraphParams. The busy loop
+    catches this specific AttributeError and skips the step. Mutating: remove
+    the try/except and a graph-mode resize crashes with AttributeError.
+    """
+    # Verify the guard exists in the engine_core patch source.
+    ec_source = pathlib.Path(seams.module.__file__).parent / "engine_core.py"
+    if not ec_source.exists():
+        ec_source = (
+            pathlib.Path(seams.module.__file__).parent.parent
+            / "patches"
+            / "engine_core.py"
+        )
+    source = ec_source.read_text()
+    assert "_graph_params is None" in source, (
+        "the busy loop must guard graph param updates on retired state"
+    )
+    assert "attn_params" in source, "the guard must match the crash signature"
 
 
 def test_non_afd_uses_native_client_unchanged(seams):

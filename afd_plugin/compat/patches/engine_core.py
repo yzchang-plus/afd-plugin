@@ -463,7 +463,32 @@ def run_busy_loop(self):
             if self.eep_scaling_state is not None:
                 state = self.eep_scaling_state
                 if state.commit_requested or not state.is_ready_for_switch():
-                    state.progress()
+                    try:
+                        state.progress()
+                    except (AttributeError, RuntimeError) as exc:
+                        # Elastic resize retires the ACL graph state
+                        # (release_link -> _retire_attention_graphs sets
+                        # acl_graph._graph_params = None) before the EEP
+                        # state machine has finished its reconfiguration.
+                        # The machine then calls update_full_graph_params
+                        # or _dummy_run -> run_fullgraph, which touch the
+                        # retired GraphParams. Between release_link and the
+                        # warmup re-capture, this is expected: there are no
+                        # graphs to update or replay. The run_fullgraph
+                        # wrapper converts the original AttributeError into
+                        # RuntimeError, so both shapes are caught here.
+                        from vllm_ascend.compilation import acl_graph as _ag
+
+                        if _ag._graph_params is None and (
+                            "attn_params" in str(exc)
+                            or "ACL graph state retired" in str(exc)
+                        ):
+                            core_module.logger.debug(
+                                "Skipping graph step on retired ACL graph "
+                                "state during elastic resize"
+                            )
+                        else:
+                            raise
                 if state.is_complete():
                     if state.worker_type == "removing":
                         raise SystemExit
@@ -472,7 +497,15 @@ def run_busy_loop(self):
                 elif not state.commit_requested and state.is_ready_for_switch():
                     self.process_input_queue_block = True
 
-            executed = self._process_engine_step()
+            # During an elastic resize, release_link destroys the connector
+            # and retires the ACL graphs. Engine steps and dummy batches that
+            # land in that window replay retired graphs and crash. Skip both,
+            # but keep the DP coordination below running: the resize needs
+            # the all-reduce and wave consensus to progress.
+            if getattr(self, "afd_links_released", False):
+                executed = False
+            else:
+                executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
@@ -483,7 +516,9 @@ def run_busy_loop(self):
 
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
-                elif not self.model_executor.is_sleeping:
+                elif not self.model_executor.is_sleeping and not getattr(
+                    self, "afd_links_released", False
+                ):
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
                     if iteration_details is not None and not self.has_coordinator:

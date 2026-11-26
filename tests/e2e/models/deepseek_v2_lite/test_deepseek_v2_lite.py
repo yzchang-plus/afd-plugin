@@ -20,6 +20,7 @@ from tests.conftest import (
 from tests.e2e.runner import (
     DEEPEP_M2N_SCENARIOS,
     DEFAULT_GSM8K_SAMPLE_LIMIT,
+    ELASTIC_DBO_SCENARIO,
     ELASTIC_SCENARIO,
     ELASTIC_SCENARIOS,
     GSM8K_LIMIT_ENV,
@@ -45,11 +46,17 @@ TWO_FFN_SCENARIO_SUFFIX = "-2a2f"
 # CI selects exact node IDs (E2E-INV-007). GPU uses the V2 cases for the
 # shared 2A2F coverage; NPU retains its existing scenario IDs and now runs
 # every case on native Ascend MRV2 through the shared harness. The elastic
-# AFD case is NPU-only: CUDA elastic has no hardware validation yet.
+# AFD cases are NPU-only: CUDA elastic has no hardware validation yet.
 SCENARIOS = (
     "baseline-graph",
     *(
-        ("afd-eager-2a2f", "afd-graph-2a2f", "afd-graph-dbo-2a2f", ELASTIC_SCENARIO)
+        (
+            "afd-eager-2a2f",
+            "afd-graph-2a2f",
+            "afd-graph-dbo-2a2f",
+            ELASTIC_SCENARIO,
+            ELASTIC_DBO_SCENARIO,
+        )
         if os.environ.get("AFD_E2E_BACKEND") == "npu"
         else V2_SCENARIOS
     ),

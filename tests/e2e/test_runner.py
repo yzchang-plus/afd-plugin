@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +20,7 @@ from tests.e2e import runner
 from tests.e2e.models.deepseek_v4_flash import test_async_cam_npu as entrypoint
 
 CONCURRENT_REQUESTS = 10
-# Shared argv for the elastic scenario; parsed through the same argument and
+# Shared argv for the elastic scenarios; parsed through the same argument and
 # scenario-configuration path the E2E driver uses.
 ELASTIC_ARGV = (
     "--model",
@@ -33,10 +34,12 @@ ELASTIC_ARGV = (
 )
 
 
-def elastic_args() -> argparse.Namespace:
+def elastic_args(scenario: str = runner.ELASTIC_SCENARIO) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     runner.add_scenario_arguments(parser)
-    args = parser.parse_args(ELASTIC_ARGV)
+    argv = list(ELASTIC_ARGV)
+    argv[argv.index("--scenario") + 1] = scenario
+    args = parser.parse_args(argv)
     runner.configure_scenario(args)
     return args
 
@@ -240,5 +243,117 @@ def test_elastic_negative_resize_target_exceeds_the_max_dp_bound():
 
 def test_elastic_scenario_stays_outside_the_gpu_v2_gate():
     # V2_SCENARIOS membership makes the runner require GPU, so the elastic
-    # case must keep its own NPU-only validation.
+    # cases must keep their own NPU-only validation.
     assert runner.ELASTIC_SCENARIO not in runner.V2_SCENARIOS
+    assert runner.ELASTIC_DBO_SCENARIO not in runner.V2_SCENARIOS
+
+
+def test_elastic_dbo_scenario_settings_row_matches_the_static_cell():
+    # scenario_settings row: eager 2A2F launch topology with DBO enabled at
+    # the native NPU thresholds, not the generic 2/8 fallback.
+    args = elastic_args(runner.ELASTIC_DBO_SCENARIO)
+    assert args.baseline is False
+    assert args.cuda_graph_full_decode_only is False
+    assert args.enable_dbo is True
+    assert args.num_attention_ranks == 2
+    assert args.num_ffn_ranks == 2
+    assert args.dbo_decode_token_threshold == runner.NPU_EAGER_DBO_DECODE_THRESHOLD
+    assert args.dbo_prefill_token_threshold == runner.NPU_EAGER_DBO_PREFILL_THRESHOLD
+
+
+def test_elastic_dbo_launch_command_carries_dbo_and_evidence_flags():
+    command = runner.build_vllm_command(
+        elastic_args(runner.ELASTIC_DBO_SCENARIO),
+        role="attention",
+    )
+    assert "--enable-dbo" in command
+    assert flag_value(command, "--dbo-decode-token-threshold") == str(
+        runner.NPU_EAGER_DBO_DECODE_THRESHOLD
+    )
+    assert flag_value(command, "--dbo-prefill-token-threshold") == str(
+        runner.NPU_EAGER_DBO_PREFILL_THRESHOLD
+    )
+    assert (
+        flag_value(command, "--worker-extension-cls")
+        == runner.MRV2_EVIDENCE_WORKER_CLS
+    )
+    # DBO never lifts the eager contract the elastic ladder depends on.
+    assert "--enforce-eager" in command
+
+
+def test_elastic_base_launch_command_carries_no_dbo_or_evidence_flags():
+    command = runner.build_vllm_command(elastic_args(), role="attention")
+    assert "--enable-dbo" not in command
+    assert "--worker-extension-cls" not in command
+
+
+def test_elastic_dbo_evidence_covers_attention_only():
+    # The elastic FFN pool runs as actors inside the single Attention serve
+    # with no periodic health RPC driver, so only Attention summaries can be
+    # demanded inside a window; the static DBO cell keeps both roles.
+    assert runner.execution_evidence_roles(
+        elastic_args(runner.ELASTIC_DBO_SCENARIO)
+    ) == ("attention",)
+    assert runner.execution_evidence_roles(
+        elastic_args(runner.NPU_EAGER_DBO_SCENARIO)
+    ) == ("attention", "ffn")
+
+
+def test_elastic_dbo_scenario_collects_execution_evidence():
+    assert runner.needs_mrv2_execution_evidence(
+        elastic_args(runner.ELASTIC_DBO_SCENARIO)
+    )
+    assert not runner.needs_mrv2_execution_evidence(elastic_args())
+
+
+def test_elastic_evaluation_wraps_both_gsm8k_runs_in_evidence_windows(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "start_evaluation_window",
+        lambda args, marker, window: calls.append(f"start:{window}"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "finish_evaluation_window",
+        lambda args, marker, window, evidence, processes: calls.append(
+            f"finish:{window}"
+        ),
+    )
+    monkeypatch.setattr(
+        runner, "run_gsm8k_evaluation", lambda args: calls.append("gsm8k")
+    )
+    monkeypatch.setattr(
+        runner, "run_elastic_ladder", lambda args, processes: calls.append("ladder")
+    )
+    runner.run_elastic_scenario_evaluation(
+        elastic_args(runner.ELASTIC_DBO_SCENARIO), [], None, []
+    )
+    assert calls == [
+        f"start:{runner.ELASTIC_PRE_LADDER_WINDOW}",
+        "gsm8k",
+        f"finish:{runner.ELASTIC_PRE_LADDER_WINDOW}",
+        "ladder",
+        f"start:{runner.ELASTIC_POST_LADDER_WINDOW}",
+        "gsm8k",
+        f"finish:{runner.ELASTIC_POST_LADDER_WINDOW}",
+    ]
+
+
+def test_elastic_dbo_env_names_the_evidence_marker_for_ray_actors(monkeypatch):
+    monkeypatch.delenv("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", raising=False)
+    args = elastic_args(runner.ELASTIC_DBO_SCENARIO)
+    marker = "/tmp/afd-e2e-mrv2/evaluation-start"
+    env = runner.build_env(
+        "0,1,2,3",
+        args,
+        role="attention",
+        mrv2_evidence_start=Path(marker),
+    )
+    # vLLM copies only prefix-registered env vars into Ray actor
+    # runtime_envs, so the marker must be named explicitly for the
+    # engine/FFN actors to import the evidence extension.
+    assert env["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] == "AFD_E2E_MRV2_EVIDENCE_START"
+    assert env["AFD_E2E_MRV2_EVIDENCE_START"] == marker
+    base_env = runner.build_env("0,1,2,3", elastic_args(), role="attention")
+    assert "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY" not in base_env

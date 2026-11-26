@@ -100,7 +100,8 @@ V2_TENSOR_PARALLEL_SCENARIOS = frozenset(
 # actor pool inside it and the /scale_elastic_ep route resizes either role.
 # Ascend NPU only -- CUDA elastic has no hardware validation yet.
 ELASTIC_SCENARIO = "afd-v2-elastic-eager-2a2f"
-ELASTIC_SCENARIOS = frozenset((ELASTIC_SCENARIO,))
+ELASTIC_DBO_SCENARIO = "afd-v2-elastic-eager-dbo-2a2f"
+ELASTIC_SCENARIOS = frozenset((ELASTIC_SCENARIO, ELASTIC_DBO_SCENARIO))
 ELASTIC_ATTENTION_WORKER_CLS = "afd_plugin.v1.worker.npu.AFDNPUAttentionWorker"
 # Two-phase native scaling bound, 2x the launch DP of 2 (the sizing
 # mn_serve.sh uses); the negative-path step asks for twice this and must be
@@ -132,6 +133,13 @@ ELASTIC_LIGHT_COMPLETION_PROMPTS = (
     "Compute 19 + 7. Reply with just the number.",
     "Compute 25 + 7. Reply with just the number.",
 )
+# Evidence windows around the two GSM8K runs; distinct names keep the
+# post-ladder summaries from mixing into the pre-ladder window.
+ELASTIC_PRE_LADDER_WINDOW = "gsm8k-pre-ladder"
+ELASTIC_POST_LADDER_WINDOW = "gsm8k-post-ladder"
+# Both opt-in NPU eager DBO cells (the static 2A2F case and the elastic
+# variant) qualify DBO at the native 0.32 thresholds.
+NPU_EAGER_DBO_SCENARIOS = frozenset((NPU_EAGER_DBO_SCENARIO, ELASTIC_DBO_SCENARIO))
 E2E_RUN_ID_ENV = "AFD_E2E_RUN_ID"
 E2E_PROCESS_ROLE_ENV = "AFD_E2E_PROCESS_ROLE"
 PROCESS_TERMINATION_TIMEOUT_S = 20
@@ -159,6 +167,7 @@ DBO_EVAL_NUM_UBATCHES = 2
 MRV2_EVIDENCE_RPC_TIMEOUT_S = 30
 MRV2_EVIDENCE_REPLAY_MIN_COUNT = 2
 MRV2_EVIDENCE_PREFIX = "AFD E2E execution: "
+MRV2_EVIDENCE_WORKER_CLS = "tests.e2e.mrv2_evidence.Worker"
 
 
 def main() -> int:
@@ -254,7 +263,12 @@ def main() -> int:
         ensure_processes_alive(processes)
 
         if args.scenario in ELASTIC_SCENARIOS:
-            run_elastic_scenario_evaluation(args, processes)
+            run_elastic_scenario_evaluation(
+                args,
+                processes,
+                mrv2_evidence_start,
+                mrv2_execution_evidence,
+            )
         elif args.scenario in DSV4_GPU_SCENARIOS:
             round_samples = []
             for round_index in range(dsv4_gpu_config.DSV4_GPU_CONCURRENT_ROUNDS):
@@ -471,6 +485,7 @@ def configure_scenario(args: argparse.Namespace) -> None:
         "afd-v2-graph-dbo-tp2": (False, True, True, 2, 2),
         # Launch topology 2A2F; the ladder returns to it after every resize.
         ELASTIC_SCENARIO: (False, False, False, 2, 2),
+        ELASTIC_DBO_SCENARIO: (False, False, True, 2, 2),
         **DSV4_GPU_SCENARIO_SETTINGS,
         "afd-deepep-m2n-eager-2a2f": (False, False, False, 2, 2),
         "afd-deepep-m2n-graph-2a2f": (False, True, False, 2, 2),
@@ -540,8 +555,8 @@ def configure_scenario(args: argparse.Namespace) -> None:
             if is_dsv4_gpu
             else DEFAULT_CUDAGRAPH_CAPTURE_SIZE
         )
-    if args.scenario == NPU_EAGER_DBO_SCENARIO:
-        # This opt-in eager cell qualifies DBO at the native 0.32 thresholds.
+    if args.scenario in NPU_EAGER_DBO_SCENARIOS:
+        # These opt-in eager cells qualify DBO at the native 0.32 thresholds.
         args.dbo_decode_token_threshold = NPU_EAGER_DBO_DECODE_THRESHOLD
         args.dbo_prefill_token_threshold = NPU_EAGER_DBO_PREFILL_THRESHOLD
     elif enable_dbo:
@@ -688,7 +703,7 @@ def build_baseline_command(args: argparse.Namespace) -> list[str]:
         "--enable-expert-parallel",
     ]
     if needs_mrv2_execution_evidence(args):
-        cmd.extend(["--worker-extension-cls", "tests.e2e.mrv2_evidence.Worker"])
+        cmd.extend(["--worker-extension-cls", MRV2_EVIDENCE_WORKER_CLS])
     cmd.extend(dbo_vllm_arguments(args))
     if args.cuda_graph_full_decode_only:
         capture_size = str(args.cudagraph_capture_size)
@@ -859,7 +874,7 @@ def build_vllm_command(
             ],
         )
     if needs_mrv2_execution_evidence(args):
-        cmd.extend(["--worker-extension-cls", "tests.e2e.mrv2_evidence.Worker"])
+        cmd.extend(["--worker-extension-cls", MRV2_EVIDENCE_WORKER_CLS])
     if args.scenario in V2_DBO_COMPARISON_SCENARIOS:
         # Keep request concurrency identical across the no-DBO, eager DBO
         # and graph DBO comparison; retain native chunked-prefill defaults.
@@ -1026,16 +1041,51 @@ def plan_elastic_ladder(device_count: int) -> list[tuple[str, int]]:
 def run_elastic_scenario_evaluation(
     args: argparse.Namespace,
     processes: list[subprocess.Popen[str]],
+    mrv2_evidence_start: Path | None,
+    mrv2_execution_evidence: list[tuple[str, str]],
 ) -> None:
     """GSM8K before and after the resize ladder, both at the launch topology.
 
     The ladder returns the deployment to 2A2F, so a second accuracy failure
     points at the resizes rather than at a different topology. lm-eval writes
-    timestamped result directories, so both runs stay on disk.
+    timestamped result directories, so both runs stay on disk. The DBO variant
+    collects two-stage execution evidence in a window around each run; the
+    non-DBO case keeps the same structure with the window helpers disabled.
     """
-    run_gsm8k_evaluation(args)
+    run_elastic_evaluation_window(
+        args,
+        processes,
+        mrv2_evidence_start,
+        mrv2_execution_evidence,
+        ELASTIC_PRE_LADDER_WINDOW,
+    )
     run_elastic_ladder(args, processes)
+    run_elastic_evaluation_window(
+        args,
+        processes,
+        mrv2_evidence_start,
+        mrv2_execution_evidence,
+        ELASTIC_POST_LADDER_WINDOW,
+    )
+
+
+def run_elastic_evaluation_window(
+    args: argparse.Namespace,
+    processes: list[subprocess.Popen[str]],
+    mrv2_evidence_start: Path | None,
+    mrv2_execution_evidence: list[tuple[str, str]],
+    window: str,
+) -> None:
+    """One GSM8K run wrapped in the scenario's execution-evidence window."""
+    start_evaluation_window(args, mrv2_evidence_start, window)
     run_gsm8k_evaluation(args)
+    finish_evaluation_window(
+        args,
+        mrv2_evidence_start,
+        window,
+        mrv2_execution_evidence,
+        processes,
+    )
 
 
 def run_elastic_ladder(
@@ -1258,6 +1308,12 @@ def uses_dbo_execution(args: argparse.Namespace) -> bool:
 def execution_evidence_roles(args: argparse.Namespace) -> tuple[str, ...]:
     if args.baseline:
         return ("baseline",)
+    if args.scenario in ELASTIC_SCENARIOS:
+        # The elastic FFN pool runs as Ray actors inside the single Attention
+        # serve. Nothing drives their periodic health RPC inside an evidence
+        # window, so a DBO window can only demand Attention summaries; the
+        # static two-serve DBO scenarios keep the full A/F layout match.
+        return ("attention",)
     # Async CAM stages belong to Attention; FFN consumes independent native
     # work items. Sync graph/DBO must prove the matching path on both roles.
     return ("attention",) if uses_async_connector(args) else ("attention", "ffn")
@@ -1609,6 +1665,14 @@ def build_env(
             env.pop("AFD_E2E_NATIVE_BASELINE", None)
         if mrv2_evidence_start is not None:
             env["AFD_E2E_MRV2_EVIDENCE_START"] = str(mrv2_evidence_start)
+        if args.scenario in ELASTIC_SCENARIOS:
+            # The evidence extension must import inside the Ray-spawned engine
+            # and FFN actors; vLLM copies only prefix-registered env vars into
+            # actor runtime_envs, so name the marker explicitly.
+            env.setdefault(
+                "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY",
+                "AFD_E2E_MRV2_EVIDENCE_START",
+            )
     if args.baseline:
         env["VLLM_PLUGINS"] = "ascend" if args.device_backend == "npu" else ""
     elif args.scenario in ELASTIC_SCENARIOS:

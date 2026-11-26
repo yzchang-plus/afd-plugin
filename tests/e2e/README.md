@@ -8,8 +8,9 @@ The DeepSeek-V2-Lite GPU gate runs seven scenarios: `baseline-graph`,
 `afd-v2-graph-tp2`, `afd-v2-eager-dbo-dp2`, and `afd-v2-graph-dbo-dp2`.
 The V2 DP2 cases replace the duplicate GPU `afd-eager-2a2f`,
 `afd-graph-2a2f`, and `afd-graph-dbo-2a2f` cases. NPU retains those three
-2A2F cases plus `baseline-graph` and the NPU-only elastic case
-`afd-v2-elastic-eager-2a2f` (see the scenario section below). Qwen3 MoE
+2A2F cases plus `baseline-graph` and the NPU-only elastic cases
+`afd-v2-elastic-eager-2a2f` and `afd-v2-elastic-eager-dbo-2a2f` (see the
+scenario section below). Qwen3 MoE
 retains four GPU gate cases:
 baseline and AFD eager, graph, and graph+DBO on 2A1F. Qwen3.6 MoE retains
 three: baseline and AFD eager and graph on 2A1F. GDN DBO is unsupported.
@@ -19,8 +20,8 @@ The DeepSeek-V2-Lite, Qwen3 MoE, and Qwen3.6 MoE GPU model suites collect
 as `afd-v2-graph-dbo-tp2`. The separate DSV4 Flash CUDA suite is described
 below.
 
-The current suite has 14 DeepSeek cases (13 GPU plus the NPU-only elastic
-case), four Qwen3 MoE cases, and three Qwen3.6 MoE cases.
+The current suite has 15 DeepSeek cases (13 GPU plus the two NPU-only
+elastic cases), four Qwen3 MoE cases, and three Qwen3.6 MoE cases.
 Qwen3.6 GDN DBO is unsupported. Workload and threshold settings are
 scenario-specific; see the scenario sections below.
 
@@ -54,7 +55,7 @@ is used as-is; otherwise the defaults are:
   leaving the fourth device idle. DeepSeek-V2-Lite eager/graph are local-only;
   its graph+DBO case is selected by weekly CI. Qwen3 MoE selects all three AFD
   modes; Qwen3.6 MoE selects only AFD eager and graph.
-- The elastic case passes every listed device to its single Attention serve;
+- The elastic cases pass every listed device to their single Attention serve;
   the plugin places the FFN pool itself. Four devices run the shrink/restore
   ladder, six add Attention growth, and eight add FFN growth.
 
@@ -113,8 +114,9 @@ python -m pytest -q -s \
   "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[baseline-graph]" \
   "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-eager-2a2f]" \
   "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-graph-2a2f]" \
-  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-graph-dbo-2a2f]" \
-  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-v2-elastic-eager-2a2f]"
+  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-graph-dbo-2a2f]" \
+  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-v2-elastic-eager-2a2f]" \
+  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-v2-elastic-eager-dbo-2a2f]"
 
 # Qwen3 MoE (P2P cases; add the DeepEP M2N cases with -k deepep_m2n)
 python -m pytest -q -s \
@@ -128,10 +130,10 @@ python -m pytest -q -s \
   tests/e2e/models/qwen3_6/test_qwen3_6.py
 ```
 
-Success means seven GPU DeepSeek gate cases, five NPU DeepSeek gate cases,
+Success means seven GPU DeepSeek gate cases, six NPU DeepSeek gate cases,
 four GPU Qwen3 MoE P2P cases, five GPU Qwen3 MoE DeepEP M2N cases, or three
 GPU Qwen3.6 MoE cases, passed with zero skips.
-Running the entire DeepSeek module collects 13 cases on GPU and eight on NPU,
+Running the entire DeepSeek module collects 13 cases on GPU and nine on NPU,
 including local-only cases.
 
 The Qwen3.5/3.6 adapter-family suite uses `Qwen/Qwen3.6-35B-A3B` and
@@ -229,12 +231,23 @@ three short completions. One negative step requests Attention 8, beyond the
 max-dp bound: it must be refused with a readable HTTP error in time while the
 service stays healthy.
 
+`afd-v2-elastic-eager-dbo-2a2f` is the DBO variant of the same case: the
+identical single-serve launch and ladder, plus `--enable-dbo` at the native
+NPU thresholds (decode 32, prefill 512) and the test-only worker extension
+from the DBO evidence paragraph above. Both GSM8K runs sit inside a named
+evidence window that demands completed two-stage steps with a shared layout
+on every Attention rank. The FFN pool runs as Ray actors inside the same
+serve and nothing drives their periodic health RPC inside a window, so the
+elastic variant asserts the Attention side only, without the static DBO
+scenarios' cross-role layout match.
+
 ```bash
 export AFD_E2E_BACKEND=npu
 # Four default devices run the shrink/restore ladder; export AFD_E2E_DEVICES
 # with six or eight entries to also exercise Attention or A+F growth.
 python -m pytest -q -s \
-  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-v2-elastic-eager-2a2f]"
+  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-v2-elastic-eager-2a2f]" \
+  "tests/e2e/models/deepseek_v2_lite/test_deepseek_v2_lite.py::test_deepseek_v2_lite[afd-v2-elastic-eager-dbo-2a2f]"
 ```
 
 ### GPU ModelRunnerV2 scenarios

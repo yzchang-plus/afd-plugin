@@ -20,6 +20,8 @@ from tests.conftest import (
 from tests.e2e.runner import (
     DEEPEP_M2N_SCENARIOS,
     DEFAULT_GSM8K_SAMPLE_LIMIT,
+    ELASTIC_SCENARIO,
+    ELASTIC_SCENARIOS,
     GSM8K_LIMIT_ENV,
     GSM8K_THRESHOLD_ENV,
     V2_DBO_COMPARISON_SCENARIOS,
@@ -42,11 +44,12 @@ BASELINE_DEVICE_COUNT = 4
 TWO_FFN_SCENARIO_SUFFIX = "-2a2f"
 # CI selects exact node IDs (E2E-INV-007). GPU uses the V2 cases for the
 # shared 2A2F coverage; NPU retains its existing scenario IDs and now runs
-# every case on native Ascend MRV2 through the shared harness.
+# every case on native Ascend MRV2 through the shared harness. The elastic
+# AFD case is NPU-only: CUDA elastic has no hardware validation yet.
 SCENARIOS = (
     "baseline-graph",
     *(
-        ("afd-eager-2a2f", "afd-graph-2a2f", "afd-graph-dbo-2a2f")
+        ("afd-eager-2a2f", "afd-graph-2a2f", "afd-graph-dbo-2a2f", ELASTIC_SCENARIO)
         if os.environ.get("AFD_E2E_BACKEND") == "npu"
         else V2_SCENARIOS
     ),
@@ -106,7 +109,11 @@ def build_runner_command(scenario: str, gsm8k_output_path: Path) -> list[str]:
         devices = ["0", "1"]
     else:
         devices = list(DEFAULT_DEVICE_IDS)
-    if scenario == "baseline-graph":
+    if scenario in ELASTIC_SCENARIOS:
+        # One serve owns every device; the plugin spawns the FFN pool itself.
+        attention_devices = devices
+        ffn_devices = []
+    elif scenario == "baseline-graph":
         attention_devices = devices[:BASELINE_DEVICE_COUNT]
         ffn_devices = []
     elif scenario in V2_SINGLE_RANK_SCENARIOS:
@@ -137,7 +144,7 @@ def build_runner_command(scenario: str, gsm8k_output_path: Path) -> list[str]:
         "--attention-devices",
         ",".join(attention_devices),
     ]
-    if scenario != "baseline-graph":
+    if scenario != "baseline-graph" and scenario not in ELASTIC_SCENARIOS:
         command.extend(["--ffn-devices", ",".join(ffn_devices)])
     command.extend(
         [

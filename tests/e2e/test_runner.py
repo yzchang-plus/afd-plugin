@@ -3,6 +3,7 @@
 
 """Host-only harness integration: real sockets, processes and signals; no devices."""
 
+import argparse
 import contextlib
 import json
 import os
@@ -14,9 +15,34 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from tests.e2e import runner
 from tests.e2e.models.deepseek_v4_flash import test_async_cam_npu as entrypoint
 
 CONCURRENT_REQUESTS = 10
+# Shared argv for the elastic scenario; parsed through the same argument and
+# scenario-configuration path the E2E driver uses.
+ELASTIC_ARGV = (
+    "--model",
+    "/models/deepseek-v2-lite",
+    "--scenario",
+    runner.ELASTIC_SCENARIO,
+    "--device-backend",
+    "npu",
+    "--gsm8k-output-path",
+    "/tmp/gsm8k-elastic",
+)
+
+
+def elastic_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    runner.add_scenario_arguments(parser)
+    args = parser.parse_args(ELASTIC_ARGV)
+    runner.configure_scenario(args)
+    return args
+
+
+def flag_value(command: list[str], flag: str) -> str:
+    return command[command.index(flag) + 1]
 
 
 CANCEL_SCRIPT = """
@@ -106,3 +132,113 @@ def test_cancel_blocked_requests_cleans_service_groups(
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("device_count", [4, 5, 6, 7, 8, 16])
+def test_plan_elastic_ladder_keeps_every_step_legal(device_count):
+    attention_dp, ffn_dp = 2, 2
+    for role, new_size in runner.plan_elastic_ladder(device_count):
+        if role == "attention":
+            attention_dp = new_size
+        else:
+            ffn_dp = new_size
+        assert attention_dp >= ffn_dp
+        assert attention_dp % ffn_dp == 0
+        assert attention_dp <= runner.ELASTIC_MAX_DP_SIZE
+        assert attention_dp + ffn_dp <= device_count
+    assert (attention_dp, ffn_dp) == (2, 2)
+
+
+@pytest.mark.parametrize(
+    ("device_count", "expected_steps"),
+    [
+        (3, []),
+        (4, [("ffn", 1), ("ffn", 2)]),
+        (6, [("ffn", 1), ("ffn", 2), ("attention", 4), ("attention", 2)]),
+        (
+            8,
+            [
+                ("ffn", 1),
+                ("ffn", 2),
+                ("attention", 4),
+                ("ffn", 4),
+                ("ffn", 2),
+                ("attention", 2),
+            ],
+        ),
+    ],
+)
+def test_plan_elastic_ladder_matches_device_tiers(device_count, expected_steps):
+    assert runner.plan_elastic_ladder(device_count) == expected_steps
+
+
+def test_elastic_launch_command_carries_the_single_serve_shape():
+    command = runner.build_vllm_command(elastic_args(), role="attention")
+    assert flag_value(command, "--worker-cls") == runner.ELASTIC_ATTENTION_WORKER_CLS
+    assert flag_value(command, "--data-parallel-backend") == "ray"
+    assert flag_value(command, "--distributed-executor-backend") == "uni"
+    assert "--enable-elastic-ep" in command
+    assert flag_value(command, "--elastic-ep-max-dp-size") == str(
+        runner.ELASTIC_MAX_DP_SIZE
+    )
+    assert flag_value(command, "--data-parallel-size") == "2"
+    assert flag_value(command, "--data-parallel-size-local") == "2"
+    assert flag_value(command, "--kv-cache-memory-bytes") == str(
+        runner.ELASTIC_KV_CACHE_MEMORY_BYTES
+    )
+    # Ascend cannot retire ACL graphs mid-resize, so eager is part of the
+    # contract, not a default the scenario happens to inherit.
+    assert "--enforce-eager" in command
+    assert "--max-cudagraph-capture-size" not in command
+    additional_config = json.loads(flag_value(command, "--additional-config"))
+    assert additional_config["afd"]["role"] == "attention"
+    assert additional_config["afd"]["connector"] == "CAMP2pAFDConnector"
+    assert additional_config["afd"]["num_attention_ranks"] == 2
+    assert additional_config["afd"]["num_ffn_ranks"] == 2
+    assert additional_config["afd_elastic"] == {
+        "ffn_tensor_parallel_size": runner.ELASTIC_FFN_TENSOR_PARALLEL_SIZE,
+    }
+
+
+@pytest.mark.parametrize(
+    ("device_backend", "attention_devices", "ffn_devices", "match"),
+    [
+        ("gpu", ["0", "1", "2", "3"], [], "NPU backend"),
+        ("npu", ["0", "1", "2", "3"], ["4"], "ffn-devices"),
+        ("npu", ["0", "1"], [], "at least 4 devices"),
+        ("npu", ["0", "0", "1", "2"], [], "unique"),
+    ],
+)
+def test_elastic_topology_rejects_invalid_launches(
+    device_backend, attention_devices, ffn_devices, match
+):
+    args = elastic_args()
+    args.device_backend = device_backend
+    with pytest.raises(ValueError, match=match):
+        runner.validate_topology(args, attention_devices, ffn_devices)
+
+
+def test_elastic_topology_accepts_every_device_on_one_serve():
+    runner.validate_topology(elastic_args(), ["0", "1", "2", "3"], [])
+
+
+def test_elastic_deployment_launches_attention_only():
+    role_devices, launch_order = runner.deployment_plan(
+        elastic_args(),
+        ["0", "1", "2", "3"],
+        [],
+    )
+    assert role_devices == {"attention": ["0", "1", "2", "3"]}
+    assert launch_order == (("attention", "ATTN"),)
+
+
+def test_elastic_negative_resize_target_exceeds_the_max_dp_bound():
+    # If the refused request ever fit under --elastic-ep-max-dp-size the
+    # negative path would resize for real and stop proving the preflight.
+    assert runner.ELASTIC_REJECTED_ATTENTION_DP > runner.ELASTIC_MAX_DP_SIZE
+
+
+def test_elastic_scenario_stays_outside_the_gpu_v2_gate():
+    # V2_SCENARIOS membership makes the runner require GPU, so the elastic
+    # case must keep its own NPU-only validation.
+    assert runner.ELASTIC_SCENARIO not in runner.V2_SCENARIOS

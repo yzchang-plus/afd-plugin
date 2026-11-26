@@ -96,6 +96,42 @@ V2_SINGLE_RANK_SCENARIOS = frozenset(
 V2_TENSOR_PARALLEL_SCENARIOS = frozenset(
     ("afd-v2-eager-tp2", "afd-v2-graph-tp2", "afd-v2-graph-dbo-tp2"),
 )
+# Elastic AFD is a single Attention serve: the plugin spawns the FFN Ray
+# actor pool inside it and the /scale_elastic_ep route resizes either role.
+# Ascend NPU only -- CUDA elastic has no hardware validation yet.
+ELASTIC_SCENARIO = "afd-v2-elastic-eager-2a2f"
+ELASTIC_SCENARIOS = frozenset((ELASTIC_SCENARIO,))
+ELASTIC_ATTENTION_WORKER_CLS = "afd_plugin.v1.worker.npu.AFDNPUAttentionWorker"
+# Two-phase native scaling bound, 2x the launch DP of 2 (the sizing
+# mn_serve.sh uses); the negative-path step asks for twice this and must be
+# refused by the preflight instead of being executed.
+ELASTIC_MAX_DP_SIZE = 4
+ELASTIC_REJECTED_ATTENTION_DP = 8
+# Elastic AFD refuses to start without an explicit KV budget, and graph mode
+# cannot retire ACL graphs mid-resize on Ascend, so the scenario stays eager.
+ELASTIC_KV_CACHE_MEMORY_BYTES = 2147483648
+ELASTIC_FFN_TENSOR_PARALLEL_SIZE = 1
+# Ladder device tiers: any host that can launch 2A2F shrinks/restores FFN;
+# hosts with two spare devices also grow Attention, and only hosts that fit
+# the full 4A4F layout grow FFN too. Every tier ends back at 2A2F.
+ELASTIC_BASE_DP = 2
+ELASTIC_FFN_SHRUNK_DP = 1
+ELASTIC_EXPANDED_DP = 4
+ELASTIC_LADDER_MIN_DEVICES = 4
+ELASTIC_LADDER_ATTENTION_EXPAND_DEVICES = 6
+ELASTIC_LADDER_FFN_EXPAND_DEVICES = 8
+# A resize drains in-flight work and reloads weights on fresh NPU actors, so
+# the HTTP call needs a budget far beyond a normal control request.
+ELASTIC_RESIZE_TIMEOUT_S = 600
+ELASTIC_RESIZE_DRAIN_TIMEOUT_S = 120
+ELASTIC_HEALTH_TIMEOUT_S = 300
+ELASTIC_COMPLETION_TIMEOUT_S = 300
+ELASTIC_LIGHT_COMPLETION_MAX_TOKENS = 64
+ELASTIC_LIGHT_COMPLETION_PROMPTS = (
+    "Compute 12 + 7. Reply with just the number.",
+    "Compute 19 + 7. Reply with just the number.",
+    "Compute 25 + 7. Reply with just the number.",
+)
 E2E_RUN_ID_ENV = "AFD_E2E_RUN_ID"
 E2E_PROCESS_ROLE_ENV = "AFD_E2E_PROCESS_ROLE"
 PROCESS_TERMINATION_TIMEOUT_S = 20
@@ -174,25 +210,15 @@ def main() -> int:
                 if mrv2_evidence_dir is not None:
                     mrv2_evidence_dir.cleanup()
 
-    launch_order: tuple[tuple[str, str], ...]
     with cancellable_run(cleanup):
         if needs_mrv2_execution_evidence(args):
             mrv2_evidence_dir = tempfile.TemporaryDirectory(prefix="afd-e2e-mrv2-")
             mrv2_evidence_start = Path(mrv2_evidence_dir.name) / "evaluation-start"
-        if args.baseline:
-            role_devices = {"baseline": attention_devices}
-            launch_order = (("baseline", "BASELINE"),)
-        else:
-            role_devices = {
-                "attention": attention_devices,
-                "ffn": ffn_devices,
-            }
-            launch_order = (
-                ("attention", "ATTN"),
-                ("ffn", "FFN"),
-            )
-            if not uses_async_connector(args):
-                launch_order = tuple(reversed(launch_order))
+        role_devices, launch_order = deployment_plan(
+            args,
+            attention_devices,
+            ffn_devices,
+        )
 
         for role, label in launch_order:
             command = (
@@ -227,7 +253,9 @@ def main() -> int:
         wait_for_openai_api(args, processes)
         ensure_processes_alive(processes)
 
-        if args.scenario in DSV4_GPU_SCENARIOS:
+        if args.scenario in ELASTIC_SCENARIOS:
+            run_elastic_scenario_evaluation(args, processes)
+        elif args.scenario in DSV4_GPU_SCENARIOS:
             round_samples = []
             for round_index in range(dsv4_gpu_config.DSV4_GPU_CONCURRENT_ROUNDS):
                 window = f"concurrent-{round_index + 1}"
@@ -320,6 +348,7 @@ def add_scenario_arguments(parser: argparse.ArgumentParser) -> None:
             *DSV4_GPU_SCENARIOS,
             *V2_SCENARIOS,
             *DEEPEP_M2N_SCENARIOS,
+            *ELASTIC_SCENARIOS,
         ],
         required=True,
         help="Fixed E2E scenario to run.",
@@ -440,6 +469,8 @@ def configure_scenario(args: argparse.Namespace) -> None:
         "afd-v2-eager-dbo-dp2": (False, False, True, 2, 2),
         "afd-v2-graph-dbo-dp2": (False, True, True, 2, 2),
         "afd-v2-graph-dbo-tp2": (False, True, True, 2, 2),
+        # Launch topology 2A2F; the ladder returns to it after every resize.
+        ELASTIC_SCENARIO: (False, False, False, 2, 2),
         **DSV4_GPU_SCENARIO_SETTINGS,
         "afd-deepep-m2n-eager-2a2f": (False, False, False, 2, 2),
         "afd-deepep-m2n-graph-2a2f": (False, True, False, 2, 2),
@@ -524,11 +555,39 @@ def parse_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def deployment_plan(
+    args: argparse.Namespace,
+    attention_devices: list[str],
+    ffn_devices: list[str],
+) -> tuple[dict[str, list[str]], tuple[tuple[str, str], ...]]:
+    """Map each launched serve to its devices and produce the start order."""
+    if args.baseline:
+        return {"baseline": attention_devices}, (("baseline", "BASELINE"),)
+    if args.scenario in ELASTIC_SCENARIOS:
+        # One serve owns every device: the plugin spawns the FFN Ray actors
+        # inside the Attention process, so FFN has no own command or devices.
+        return {"attention": attention_devices}, (("attention", "ATTN"),)
+    role_devices = {
+        "attention": attention_devices,
+        "ffn": ffn_devices,
+    }
+    launch_order = (
+        ("attention", "ATTN"),
+        ("ffn", "FFN"),
+    )
+    if not uses_async_connector(args):
+        launch_order = tuple(reversed(launch_order))
+    return role_devices, launch_order
+
+
 def validate_topology(
     args: argparse.Namespace,
     attention_devices: list[str],
     ffn_devices: list[str],
 ) -> None:
+    if args.scenario in ELASTIC_SCENARIOS:
+        validate_elastic_topology(args, attention_devices, ffn_devices)
+        return
     if len(attention_devices) != len(set(attention_devices)):
         raise ValueError("Attention devices must be unique")
     if not args.baseline and len(ffn_devices) != len(set(ffn_devices)):
@@ -580,6 +639,29 @@ def validate_topology(
                 f"{role} rank count must be divisible by TP size "
                 f"(ranks={rank_count}, tp={tp_size})",
             )
+
+
+def validate_elastic_topology(
+    args: argparse.Namespace,
+    attention_devices: list[str],
+    ffn_devices: list[str],
+) -> None:
+    """The single elastic serve must see every device both roles will use."""
+    if args.device_backend != "npu":
+        raise ValueError("Elastic AFD E2E requires the NPU backend")
+    if len(attention_devices) != len(set(attention_devices)):
+        raise ValueError("Attention devices must be unique")
+    if ffn_devices:
+        raise ValueError(
+            "Elastic AFD spawns the FFN pool inside the Attention serve; "
+            "--ffn-devices must stay empty",
+        )
+    launch_ranks = args.num_attention_ranks + args.num_ffn_ranks
+    if len(attention_devices) < launch_ranks:
+        raise ValueError(
+            f"Elastic AFD needs at least {launch_ranks} devices for its "
+            "launch topology; pass every device through --attention-devices",
+        )
 
 
 def build_baseline_command(args: argparse.Namespace) -> list[str]:
@@ -680,6 +762,10 @@ def build_vllm_command(
     )
     if connector_extra_config:
         afd_config["afd"]["connector_extra_config"] = connector_extra_config
+    if args.scenario in ELASTIC_SCENARIOS:
+        afd_config["afd_elastic"] = {
+            "ffn_tensor_parallel_size": ELASTIC_FFN_TENSOR_PARALLEL_SIZE,
+        }
     if args.scenario in DSV4_SCENARIOS:
         afd_config.update(
             dsv4_config.additional_config(
@@ -718,6 +804,28 @@ def build_vllm_command(
             json.dumps(afd_config, separators=(",", ":")),
         ],
     )
+    if args.scenario in ELASTIC_SCENARIOS:
+        # The single-serve elastic launch shape (tools/mn_serve.sh): Ray DP
+        # with the uni executor lets the plugin place the FFN actor pool, and
+        # the max-dp bound is what the resize preflight enforces. The afd
+        # host/port above are placeholders the F0 rendezvous overrides.
+        cmd.extend(
+            [
+                "--worker-cls",
+                ELASTIC_ATTENTION_WORKER_CLS,
+                "--data-parallel-backend",
+                "ray",
+                "--distributed-executor-backend",
+                "uni",
+                "--enable-elastic-ep",
+                "--elastic-ep-max-dp-size",
+                str(ELASTIC_MAX_DP_SIZE),
+                "--data-parallel-size-local",
+                str(role_dp_size),
+                "--kv-cache-memory-bytes",
+                str(ELASTIC_KV_CACHE_MEMORY_BYTES),
+            ],
+        )
     if slot is not None and slot.spans_pods:
         cmd.extend(
             [
@@ -885,6 +993,185 @@ def run_scenario_evaluation(args: argparse.Namespace) -> None:
         run_concurrent_completion_evaluation(args)
     else:
         run_gsm8k_evaluation(args)
+
+
+def plan_elastic_ladder(device_count: int) -> list[tuple[str, int]]:
+    """Plan the (role, new_data_parallel_size) resizes for this host.
+
+    Pure on purpose: the device tiers stay unit-testable on hosts without
+    NPU hardware. Expansion steps always close with their matching shrink so
+    the ladder ends back at the 2A2F launch topology whatever the tier.
+    """
+    steps: list[tuple[str, int]] = []
+    if device_count >= ELASTIC_LADDER_MIN_DEVICES:
+        steps.extend(
+            (
+                ("ffn", ELASTIC_FFN_SHRUNK_DP),
+                ("ffn", ELASTIC_BASE_DP),
+            )
+        )
+    if device_count >= ELASTIC_LADDER_ATTENTION_EXPAND_DEVICES:
+        steps.append(("attention", ELASTIC_EXPANDED_DP))
+        if device_count >= ELASTIC_LADDER_FFN_EXPAND_DEVICES:
+            steps.extend(
+                (
+                    ("ffn", ELASTIC_EXPANDED_DP),
+                    ("ffn", ELASTIC_BASE_DP),
+                )
+            )
+        steps.append(("attention", ELASTIC_BASE_DP))
+    return steps
+
+
+def run_elastic_scenario_evaluation(
+    args: argparse.Namespace,
+    processes: list[subprocess.Popen[str]],
+) -> None:
+    """GSM8K before and after the resize ladder, both at the launch topology.
+
+    The ladder returns the deployment to 2A2F, so a second accuracy failure
+    points at the resizes rather than at a different topology. lm-eval writes
+    timestamped result directories, so both runs stay on disk.
+    """
+    run_gsm8k_evaluation(args)
+    run_elastic_ladder(args, processes)
+    run_gsm8k_evaluation(args)
+
+
+def run_elastic_ladder(
+    args: argparse.Namespace,
+    processes: list[subprocess.Popen[str]],
+) -> None:
+    """Drive every planned resize and prove the service survives each one."""
+    steps = plan_elastic_ladder(len(parse_csv(args.attention_devices)))
+    for role, new_size in steps:
+        step_started = time.monotonic()
+        post_elastic_resize(args, role, new_size)
+        wait_for_elastic_health(args)
+        ensure_processes_alive(processes)
+        run_elastic_light_completions(args)
+        print(
+            f"[elastic] {role} resize to {new_size} engines completed in "
+            f"{time.monotonic() - step_started:.1f}s"
+        )
+    assert_elastic_resize_rejected(args)
+    attention_dp, ffn_dp = args.num_attention_ranks, args.num_ffn_ranks
+    for role, new_size in steps:
+        if role == "attention":
+            attention_dp = new_size
+        else:
+            ffn_dp = new_size
+    if (attention_dp, ffn_dp) != (args.num_attention_ranks, args.num_ffn_ranks):
+        raise RuntimeError(
+            "Elastic ladder ended at "
+            f"{attention_dp}A{ffn_dp}F instead of returning to the "
+            f"{args.num_attention_ranks}A{args.num_ffn_ranks}F launch topology"
+        )
+
+
+def post_elastic_resize(
+    args: argparse.Namespace,
+    role: str,
+    new_size: int,
+) -> None:
+    """POST /scale_elastic_ep and let every non-2xx refusal raise."""
+    request = urllib.request.Request(
+        f"http://{args.api_host}:{attention_api_port(args)}/scale_elastic_ep",
+        data=json.dumps(
+            {
+                "new_data_parallel_size": new_size,
+                "role": role,
+                "drain_timeout": ELASTIC_RESIZE_DRAIN_TIMEOUT_S,
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(
+        request, timeout=ELASTIC_RESIZE_TIMEOUT_S
+    ) as response:
+        response.read()
+
+
+def assert_elastic_resize_rejected(args: argparse.Namespace) -> None:
+    """A resize beyond --elastic-ep-max-dp-size must be refused, not fatal."""
+    started = time.monotonic()
+    try:
+        post_elastic_resize(args, "attention", ELASTIC_REJECTED_ATTENTION_DP)
+    except urllib.error.HTTPError as exc:
+        if time.monotonic() - started >= ELASTIC_RESIZE_TIMEOUT_S:
+            raise RuntimeError(
+                "Out-of-bound resize refusal consumed the whole resize timeout"
+            ) from exc
+        message = exc.read().decode(errors="replace").strip()
+        if not message:
+            raise RuntimeError(
+                f"resize to {ELASTIC_REJECTED_ATTENTION_DP} was refused with "
+                f"HTTP {exc.code} but carried no readable message"
+            ) from exc
+        print(
+            f"[elastic] resize to {ELASTIC_REJECTED_ATTENTION_DP} engines "
+            f"beyond max {ELASTIC_MAX_DP_SIZE} refused as expected: "
+            f"HTTP {exc.code}: {message}"
+        )
+    else:
+        raise RuntimeError(
+            f"resize to {ELASTIC_REJECTED_ATTENTION_DP} engines beyond "
+            f"--elastic-ep-max-dp-size {ELASTIC_MAX_DP_SIZE} was accepted"
+        )
+    wait_for_elastic_health(args)
+
+
+def wait_for_elastic_health(args: argparse.Namespace) -> None:
+    """Wait until the resized deployment answers /health again."""
+    url = f"http://{args.api_host}:{attention_api_port(args)}/health"
+    deadline = time.monotonic() + ELASTIC_HEALTH_TIMEOUT_S
+    last_error: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                if response.status == 200:
+                    return
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+        time.sleep(2)
+    raise TimeoutError(
+        f"Elastic deployment did not return to healthy within "
+        f"{ELASTIC_HEALTH_TIMEOUT_S}s; last error={last_error!r}",
+    )
+
+
+def run_elastic_light_completions(args: argparse.Namespace) -> None:
+    """A few live requests after each resize: plumbing, not accuracy."""
+    url = f"http://{args.api_host}:{attention_api_port(args)}/v1/chat/completions"
+    for prompt in ELASTIC_LIGHT_COMPLETION_PROMPTS:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(
+                {
+                    "model": served_model_name(args, "attention"),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "max_tokens": ELASTIC_LIGHT_COMPLETION_MAX_TOKENS,
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(
+            request, timeout=ELASTIC_COMPLETION_TIMEOUT_S
+        ) as response:
+            payload = json.load(response)
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise RuntimeError(f"resize check {prompt!r} returned no single choice")
+        choice = choices[0]
+        content = choice.get("message", {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError(f"resize check {prompt!r} returned empty content")
+        if choice.get("finish_reason") != "stop":
+            raise RuntimeError(f"resize check {prompt!r} did not finish with stop")
+        print(f"[elastic] {prompt} -> {content.strip()}")
 
 
 def decode_bench_connector_config() -> str:
@@ -1324,6 +1611,10 @@ def build_env(
             env["AFD_E2E_MRV2_EVIDENCE_START"] = str(mrv2_evidence_start)
     if args.baseline:
         env["VLLM_PLUGINS"] = "ascend" if args.device_backend == "npu" else ""
+    elif args.scenario in ELASTIC_SCENARIOS:
+        # Without the afd_elastic endpoint plugin the native route stays
+        # role-blind, so an FFN resize would scale Attention instead.
+        env["VLLM_PLUGINS"] = "ascend,afd,afd_elastic"
     else:
         env["VLLM_PLUGINS"] = "ascend,afd" if args.device_backend == "npu" else "afd"
     if args.enable_dbo:
